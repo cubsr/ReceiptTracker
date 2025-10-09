@@ -1,5 +1,5 @@
 # ReceiptTracker
-##A gs script to track receipts from a google webapp
+## A gs script to track receipts from a google webapp
 
 Saves data sent to webapp into transaction log in google sheets and uses that data to show monthly expenses  
 Saves photos to provided folder ID
