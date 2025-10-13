@@ -8,6 +8,7 @@ function onOpen() {
     .addItem('📊 Populate Test Data', 'populateTestData')
     .addSeparator()
     .addItem('📋 Show Valid Categories', 'showValidCategories')
+    .addItem('🆕 Test Dynamic Categories', 'testDynamicCategories')
     .addItem('📂 Create Receipts Folder', 'createReceiptsFolderAndGetId')
     .addToUi();
 }
@@ -24,7 +25,7 @@ const API_KEY_USERS = {
 const RECEIPTS_FOLDER_ID = 'FileIDfromURL';
 
 // Spreadsheet header values (exact format)
-const CATEGORIES = ['Products/Ingredients', 'Gas', 'Employees', 'Rent', 'Asset Repair/Maintenance', 'Operating Supplies', 'Contracts', 'Misc'];
+const CATEGORIES = ['Amazon', 'Gas', 'Employees', 'Rent', 'Asset Repair/Maintenance', 'Operating Supplies', 'Contracts', 'Misc'];
 
 // Map user-friendly input to spreadsheet categories
 const CATEGORY_ALIASES = {
@@ -105,7 +106,7 @@ function doPost(e) {
     const inputCategory = params.category.toLowerCase().trim();
     let category;
     
-    // Check if input is an alias
+    // Check if input is an alias first
     if (CATEGORY_ALIASES[inputCategory]) {
       category = CATEGORY_ALIASES[inputCategory];
     } 
@@ -115,10 +116,10 @@ function doPost(e) {
       if (matchedCategory) {
         category = matchedCategory;
       } else {
-        return ContentService.createTextOutput(JSON.stringify({
-          success: false,
-          error: `Invalid category: ${params.category}. Valid options: ${Object.keys(CATEGORY_ALIASES).join(', ')}`
-        })).setMimeType(ContentService.MimeType.JSON);
+        // Dynamic category - use the input as-is (capitalize first letter of each word)
+        category = params.category.split(' ').map(word => 
+          word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+        ).join(' ');
       }
     }
     
@@ -132,16 +133,32 @@ function doPost(e) {
       })).setMimeType(ContentService.MimeType.JSON);
     }
     
-    // Upload photo to Google Drive if provided
-    let fileLink = '';
-    if (params.photoBase64) {
+    // Upload photos to Google Drive if provided
+    let fileLinks = [];
+    if (params.photosBase64 && Array.isArray(params.photosBase64) && params.photosBase64.length > 0) {
       try {
-        fileLink = uploadPhotoToDrive(
+        fileLinks = uploadPhotosToDrive(
+          params.photosBase64,
+          params.date,
+          category,
+          userName
+        );
+      } catch (error) {
+        return ContentService.createTextOutput(JSON.stringify({
+          success: false,
+          error: 'Failed to upload photos: ' + error.toString()
+        })).setMimeType(ContentService.MimeType.JSON);
+      }
+    } else if (params.photoBase64) {
+      // Backward compatibility - single photo
+      try {
+        const singleLink = uploadPhotoToDrive(
           params.photoBase64,
           params.date,
           category,
           userName
         );
+        fileLinks = [singleLink];
       } catch (error) {
         return ContentService.createTextOutput(JSON.stringify({
           success: false,
@@ -155,7 +172,7 @@ function doPost(e) {
       params.date,
       category,
       amount,
-      fileLink,
+      fileLinks,
       userName
     );
     
@@ -165,23 +182,26 @@ function doPost(e) {
     const year = date.getFullYear();
     const friendlyDate = `${month} ${date.getDate()}, ${year}`;
     
+    const photoCount = fileLinks.length;
     const successMessage = `✅ Receipt added successfully!\n\n` +
       `📅 Date: ${friendlyDate}\n` +
       `🏷️ Category: ${category}\n` +
       `💰 Amount: $${amount}\n` +
       `👤 Added by: ${userName}` +
-      (fileLink ? `\n📎 Receipt photo saved to Drive` : '');
+      (photoCount > 0 ? `\n📎 ${photoCount} photo${photoCount > 1 ? 's' : ''} saved to Drive` : '');
     
     return ContentService.createTextOutput(JSON.stringify({
       success: true,
       message: successMessage,
-      fileLink: fileLink,
+      fileLinks: fileLinks,
+      fileLink: fileLinks.length > 0 ? fileLinks[0] : '', // Backward compatibility
       summary: {
         date: friendlyDate,
         category: category,
         amount: `$${amount}`,
         user: userName,
-        hasPhoto: !!fileLink
+        photoCount: photoCount,
+        hasPhotos: photoCount > 0
       }
     })).setMimeType(ContentService.MimeType.JSON);
     
@@ -195,9 +215,28 @@ function doPost(e) {
 }
 
 /**
+ * Uploads multiple photos to Google Drive in organized folder structure
+ */
+function uploadPhotosToDrive(photosBase64, dateString, category, userName) {
+  const fileLinks = [];
+  
+  photosBase64.forEach((base64Data, index) => {
+    try {
+      const fileLink = uploadPhotoToDrive(base64Data, dateString, category, userName, index);
+      fileLinks.push(fileLink);
+    } catch (error) {
+      Logger.log(`Error uploading photo ${index + 1}: ${error.toString()}`);
+      throw new Error(`Failed to upload photo ${index + 1}: ${error.toString()}`);
+    }
+  });
+  
+  return fileLinks;
+}
+
+/**
  * Uploads photo to Google Drive in organized folder structure
  */
-function uploadPhotoToDrive(base64Data, dateString, category, userName) {
+function uploadPhotoToDrive(base64Data, dateString, category, userName, photoIndex = 0) {
   // Parse date in script timezone to avoid UTC conversion issues
   let date;
   if (dateString.includes('T')) {
@@ -229,7 +268,9 @@ function uploadPhotoToDrive(base64Data, dateString, category, userName) {
   
   // Create filename with timestamp
   const timestamp = Utilities.formatDate(date, Session.getScriptTimeZone(), 'yyyy-MM-dd_HH-mm-ss');
-  const filename = `receipt_${category}_${timestamp}.jpg`;
+  const filename = photoIndex > 0 
+    ? `receipt_${category}_${timestamp}_${photoIndex + 1}.jpg`
+    : `receipt_${category}_${timestamp}.jpg`;
   
   // Decode base64 and create file
   const blob = Utilities.newBlob(
@@ -261,7 +302,7 @@ function getOrCreateFolder(parentFolder, folderName) {
 /**
  * Add receipt to spreadsheet
  */
-function addReceipt(dateString, category, amount, fileLink, userName) {
+function addReceipt(dateString, category, amount, fileLinks, userName) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   
   // Parse date in script timezone to avoid UTC conversion issues
@@ -285,13 +326,88 @@ function addReceipt(dateString, category, amount, fileLink, userName) {
     sheet = createYearSheet(ss, year);
   }
   
+  // Check if category exists in sheet, add if new
+  ensureCategoryExists(sheet, category);
+  
   // Add transaction to log
-  addTransaction(sheet, date, month, category, amount, fileLink, userName);
+  addTransaction(sheet, date, month, category, amount, fileLinks, userName);
   
   // Update monthly summary table
   updateMonthlySummary(sheet, month, category, amount);
   
   return `Receipt logged: ${category} - $${amount} for ${month} ${year}`;
+}
+
+/**
+ * Ensures a category exists in the sheet, adds it if it doesn't
+ */
+function ensureCategoryExists(sheet, category) {
+  // Get current categories from header row (row 2)
+  const headerRow = 2;
+  const headerRange = sheet.getRange(headerRow, 1, 1, sheet.getLastColumn());
+  const headers = headerRange.getValues()[0];
+  
+  // Check if category already exists
+  const categoryExists = headers.includes(category);
+  
+  if (!categoryExists) {
+    // Find the column before TOTAL (last column)
+    const totalColumn = headers.indexOf('TOTAL');
+    const insertColumn = totalColumn > -1 ? totalColumn : headers.length;
+    
+    // Insert new column for the category
+    sheet.insertColumnBefore(insertColumn + 1);
+    
+    // Add category header
+    sheet.getRange(headerRow, insertColumn + 1).setValue(category)
+      .setFontWeight('bold')
+      .setBackground('#34A853')
+      .setFontColor('white');
+    
+    // Initialize all month rows with 0 for this category
+    const firstMonthRow = 3;
+    const lastMonthRow = firstMonthRow + MONTHS.length - 1;
+    
+    for (let row = firstMonthRow; row <= lastMonthRow; row++) {
+      sheet.getRange(row, insertColumn + 1).setValue(0).setNumberFormat('$#,##0.00');
+    }
+    
+    // Update annual total row
+    const annualTotalRow = lastMonthRow + 1;
+    const colLetter = String.fromCharCode(65 + insertColumn);
+    const formula = `=SUM(${colLetter}${firstMonthRow}:${colLetter}${lastMonthRow})`;
+    sheet.getRange(annualTotalRow, insertColumn + 1).setFormula(formula)
+      .setNumberFormat('$#,##0.00')
+      .setFontWeight('bold')
+      .setBackground('#FBBC04');
+    
+    // Update TOTAL column formulas to include new category
+    updateTotalFormulas(sheet, insertColumn + 1);
+    
+    Logger.log(`Added new category "${category}" to sheet`);
+  }
+}
+
+/**
+ * Updates TOTAL column formulas to include all categories
+ */
+function updateTotalFormulas(sheet, newCategoryColumn) {
+  const headerRow = 2;
+  const headers = sheet.getRange(headerRow, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const totalColumn = headers.indexOf('TOTAL') + 1;
+  
+  if (totalColumn > 0) {
+    const firstMonthRow = 3;
+    const lastMonthRow = firstMonthRow + MONTHS.length;
+    
+    // Update monthly totals
+    for (let row = firstMonthRow; row <= lastMonthRow; row++) {
+      const startCol = 2; // First category column
+      const endCol = totalColumn - 1; // Column before TOTAL
+      const formula = `=SUM(B${row}:${String.fromCharCode(65 + endCol - 1)}${row})`;
+      sheet.getRange(row, totalColumn).setFormula(formula);
+    }
+  }
 }
 
 /**
@@ -391,7 +507,7 @@ function createMonthlySummaryTable(sheet, year) {
 /**
  * Adds a transaction to the log
  */
-function addTransaction(sheet, date, month, category, amount, fileLink, userName) {
+function addTransaction(sheet, date, month, category, amount, fileLinks, userName) {
   // Find the next empty row in transaction log
   // Summary takes rows 1-15, transaction header at rows 17-18, data starts at row 19
   let lastRow = 19;
@@ -403,22 +519,41 @@ function addTransaction(sheet, date, month, category, amount, fileLink, userName
   // Format date
   const dateFormatted = Utilities.formatDate(date, Session.getScriptTimeZone(), 'MM/dd/yyyy');
   
+  // Create display text for multiple photos
+  let photoDisplay = '';
+  if (fileLinks && fileLinks.length > 0) {
+    if (fileLinks.length === 1) {
+      photoDisplay = 'View Receipt';
+    } else {
+      photoDisplay = `View ${fileLinks.length} Photos`;
+    }
+  }
+  
   // Add the transaction
   sheet.getRange(lastRow, 1, 1, 6).setValues([[
     dateFormatted,
     month,
     category,
     amount,
-    fileLink,
+    photoDisplay,
     userName
   ]]);
   
   // Format amount as currency
   sheet.getRange(lastRow, 4).setNumberFormat('$#,##0.00');
   
-  // Make link clickable if provided
-  if (fileLink) {
-    sheet.getRange(lastRow, 5).setFormula(`=HYPERLINK("${fileLink}", "View Receipt")`);
+  // Make links clickable if provided
+  if (fileLinks && fileLinks.length > 0) {
+    if (fileLinks.length === 1) {
+      // Single photo - direct link
+      sheet.getRange(lastRow, 5).setFormula(`=HYPERLINK("${fileLinks[0]}", "View Receipt")`);
+    } else {
+      // Multiple photos - create dropdown or comma-separated links
+      const linkText = fileLinks.map((link, index) => 
+        `=HYPERLINK("${link}", "Photo ${index + 1}")`
+      ).join(', ');
+      sheet.getRange(lastRow, 5).setFormula(linkText);
+    }
   }
 }
 
@@ -429,14 +564,22 @@ function updateMonthlySummary(sheet, month, category, amount) {
   // Summary table starts at row 1, header at row 2, first month at row 3
   const firstMonthRow = 3;
   const monthIndex = MONTHS.indexOf(month);
-  const categoryIndex = CATEGORIES.indexOf(category);
   
-  if (monthIndex === -1 || categoryIndex === -1) {
-    throw new Error('Invalid month or category');
+  if (monthIndex === -1) {
+    throw new Error('Invalid month: ' + month);
+  }
+  
+  // Find category column dynamically
+  const headerRow = 2;
+  const headers = sheet.getRange(headerRow, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const categoryIndex = headers.indexOf(category);
+  
+  if (categoryIndex === -1) {
+    throw new Error('Category not found in sheet: ' + category);
   }
   
   const row = firstMonthRow + monthIndex;
-  const col = 2 + categoryIndex; // Column B is first category
+  const col = categoryIndex + 1; // Convert to 1-based column
   
   // Get current value and add new amount
   const currentValue = sheet.getRange(row, col).getValue() || 0;
@@ -610,7 +753,7 @@ function populateTestData() {
         receipt.date,
         receipt.category,
         receipt.amount,
-        fakeLink,
+        [fakeLink],
         receipt.user
       );
       count++;
@@ -643,14 +786,14 @@ function testAddReceipt() {
     '2025-10-08',
     'Products/Ingredients', // Full category name still works
     45.67,
-    'https://drive.google.com/file/d/example',
+    ['https://drive.google.com/file/d/example'],
     'Test User'
   );
   Logger.log(result);
 }
 
 /**
- * Test function - simulates a complete API call with photo upload
+ * Test function - simulates a complete API call with single photo upload
  * Demonstrates using a category alias ("gas" instead of "Gas")
  */
 function testAddReceiptWithPhoto() {
@@ -670,7 +813,37 @@ function testAddReceiptWithPhoto() {
       '2025-10-08',
       'Gas',
       25.50,
-      fileLink,
+      [fileLink],
+      'Test User'
+    );
+    Logger.log(result);
+  } catch (error) {
+    Logger.log('Test failed: ' + error.toString());
+  }
+}
+
+/**
+ * Test function - simulates a complete API call with multiple photo upload
+ * Demonstrates uploading multiple photos for a single transaction
+ */
+function testAddReceiptWithMultiplePhotos() {
+  // Create simple test images (1x1 red pixel JPEG)
+  const testImageBase64 = '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/2wBDAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwA2Af/Z';
+  
+  try {
+    const fileLinks = uploadPhotosToDrive(
+      [testImageBase64, testImageBase64, testImageBase64], // 3 photos
+      '2025-10-08',
+      'Products/Ingredients',
+      'Test User'
+    );
+    Logger.log('Photos uploaded successfully: ' + fileLinks.length + ' files');
+    
+    const result = addReceipt(
+      '2025-10-08',
+      'Products/Ingredients',
+      125.75,
+      fileLinks,
       'Test User'
     );
     Logger.log(result);
@@ -705,6 +878,53 @@ function testCategoryAliases() {
 }
 
 /**
+ * Test function - demonstrates dynamic category creation
+ * Shows that new categories are automatically added to the sheet
+ */
+function testDynamicCategories() {
+  Logger.log('Testing dynamic category creation...\n');
+  
+  const year = new Date().getFullYear();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(year.toString());
+  
+  if (!sheet) {
+    sheet = createYearSheet(ss, year);
+    Logger.log(`Created sheet for ${year}`);
+  }
+  
+  const testCategories = [
+    'Marketing',
+    'Software Licenses', 
+    'Travel Expenses',
+    'Equipment Purchase',
+    'Professional Services'
+  ];
+  
+  Logger.log('Adding receipts with new categories...');
+  
+  testCategories.forEach((category, index) => {
+    try {
+      const result = addReceipt(
+        `${year}-10-${String(index + 1).padStart(2, '0')}`,
+        category,
+        100 + (index * 25),
+        [`https://drive.google.com/file/d/test_${category.replace(/\s+/g, '_')}`],
+        'Test User'
+      );
+      Logger.log(`✓ Added "${category}": ${result}`);
+    } catch (error) {
+      Logger.log(`✗ Failed to add "${category}": ${error.toString()}`);
+    }
+  });
+  
+  Logger.log('\n======================');
+  Logger.log('✓ DYNAMIC CATEGORY TEST COMPLETE');
+  Logger.log('======================');
+  Logger.log('Check the spreadsheet to see the new categories added to the monthly summary table.');
+}
+
+/**
  * Test function - tests automatic new year sheet creation
  * This simulates the first receipt entry of a new year
  */
@@ -730,7 +950,7 @@ function testNewYearAutoCreation() {
       `${nextYear}-01-01`,
       'Products/Ingredients',
       100.00,
-      'https://drive.google.com/file/d/test_new_year',
+      ['https://drive.google.com/file/d/test_new_year'],
       'Test User'
     );
     
