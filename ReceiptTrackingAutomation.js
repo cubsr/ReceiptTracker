@@ -1,71 +1,61 @@
+debugFlag = true;
 /**
  * Creates custom menu in Google Sheets
  */
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
+  ui.createMenu('Manage Transactions')
+    .addItem('➕ Insert Transaction', 'insertTransaction')
+    .addToUi();
+  if (!debugFlag) {return;}
   ui.createMenu('Receipt Tracking')
     .addItem('🔧 Initialize Spreadsheet', 'initializeSpreadsheet')
+    .addItem('📊 Add Profit Table', 'addProfitTable')
+    .addItem('📊 Add Net Results Table', 'addNetResultsTable')
     .addItem('📊 Populate Test Data', 'populateTestData')
     .addSeparator()
     .addItem('📋 Show Valid Categories', 'showValidCategories')
     .addItem('🆕 Test Dynamic Categories', 'testDynamicCategories')
     .addItem('📂 Create Receipts Folder', 'createReceiptsFolderAndGetId')
     .addToUi();
+  
 }
 
 // Map API keys to user names for tracking who added receipts
 const API_KEY_USERS = {
-  'replacewithyourkey': 'Levi',
-  'replacewithyourkey': 'Taylor',
-  'replacewithyourkey': 'Jim',
-  'replacewithyourkey': 'Bob',
-  'replacewithyourkey': 'Joe',
+  'Levi-APIKEY': 'Levi',
+  'Kate-APIKEY': 'Kate',
+  'Noah-APIKEY': 'Noah',
 };
 
-const RECEIPTS_FOLDER_ID = 'FileIDfromURL';
+const RECEIPTS_FOLDER_ID = 'recieptFolderID';
 
 // Spreadsheet header values (exact format)
-const CATEGORIES = ['Amazon', 'Gas', 'Employees', 'Rent', 'Asset Repair/Maintenance', 'Operating Supplies', 'Contracts', 'Misc'];
+const CATEGORIES = ['Retail Shelf', 'Gas', 'Rent', 'Backbar', 'Misc'];
+
 
 // Map user-friendly input to spreadsheet categories
 const CATEGORY_ALIASES = {
-  // Products/Ingredients
-  'products': 'Products/Ingredients',
-  'ingredients': 'Products/Ingredients',
-  'product': 'Products/Ingredients',
-  'food': 'Products/Ingredients',
+  // Products for Sale
+  'products': 'Retail Shelf',
+  'product': 'Retail Shelf',
+  'for sale': 'Retail Shelf',
+  'retail shelf': 'Retail Shelf',
 
   
   // Gas
   'gas': 'Gas',
   'fuel': 'Gas',
   
-  // Employees
-  'employees': 'Employees',
-  'employee': 'Employees',
-  'payroll': 'Employees',
-  'staff': 'Employees',
-  
   // Rent
   'rent': 'Rent',
   
-  // Asset Repair/Maintenance
-  'repair': 'Asset Repair/Maintenance',
-  'maintenance': 'Asset Repair/Maintenance',
-  'repairs': 'Asset Repair/Maintenance',
-  'fix': 'Asset Repair/Maintenance',
-  'asset': 'Asset Repair/Maintenance',
-  
-  // Operating Supplies
-  'supplies': 'Operating Supplies',
-  'supply': 'Operating Supplies',
-  'operating supplies': 'Operating Supplies',
-  
-  // Contracts
-  'contracts': 'Contracts',
-  'contract': 'Contracts',
-  'service': 'Contracts',
-  'services': 'Contracts',
+  // Service Expenses (Tools/Shampoo/Similar)
+  'service expenses': 'Backbar',
+  'service expense': 'Backbar',
+  'service': 'Backbar',
+  'backbar supply': 'Backbar',
+  'backbar': 'Backbar',
   
   // Misc
   'misc': 'Misc',
@@ -78,6 +68,8 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
 
 /**
  * Main function - accepts photo as base64 string
+ * Params:
+ * date, category, amount, apiKey, photosBase64
  */
 function doPost(e) {
   try {
@@ -267,7 +259,7 @@ function uploadPhotoToDrive(base64Data, dateString, category, userName, photoInd
   let monthFolder = getOrCreateFolder(yearFolder, month);
   
   // Create filename with timestamp
-  const timestamp = Utilities.formatDate(date, Session.getScriptTimeZone(), 'yyyy-MM-dd_HH-mm-ss');
+  const timestamp = Utilities.formatDate(date, 'America/Chicago', 'yyyy-MM-dd_HH-mm-ss');
   const filename = photoIndex > 0 
     ? `receipt_${category}_${timestamp}_${photoIndex + 1}.jpg`
     : `receipt_${category}_${timestamp}.jpg`;
@@ -502,6 +494,342 @@ function createMonthlySummaryTable(sheet, year) {
   // Format the table
   const tableRange = sheet.getRange(startRow + 1, 1, MONTHS.length + 2, headers.length);
   tableRange.setBorder(true, true, true, true, true, true);
+}
+
+/**
+ * Adds a profit table 2 columns to the right of the expenses table
+ * Works on all year-named sheets that don't already have the table
+ */
+function addProfitTable() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = ss.getSheets();
+  
+  const yearSheets = [];
+  for (const sheet of sheets) {
+    const sheetName = sheet.getName();
+    if (/^\d{4}$/.test(sheetName)) {
+      yearSheets.push(sheet);
+    }
+  }
+  
+  if (yearSheets.length === 0) {
+    SpreadsheetApp.getUi().alert('No year sheets found. Please initialize the spreadsheet first.');
+    return;
+  }
+  
+  let addedCount = 0;
+  let skippedCount = 0;
+  
+  for (const sheet of yearSheets) {
+    const sheetName = sheet.getName();
+    
+    if (sheetHasProfitTable(sheet)) {
+      skippedCount++;
+      continue;
+    }
+    
+    addProfitTableToSheet(sheet, sheetName);
+    addedCount++;
+  }
+  
+  let message = '';
+  if (addedCount > 0) {
+    message += `Profit table added to ${addedCount} sheet(s).\n\n`;
+  }
+  if (skippedCount > 0) {
+    message += `${skippedCount} sheet(s) already had the profit table.`;
+  }
+  
+  SpreadsheetApp.getUi().alert(
+    'Profit Table Update Complete',
+    message.trim(),
+    SpreadsheetApp.getUi().ButtonSet.OK
+  );
+}
+
+/**
+ * Checks if a sheet already has a profit table
+ */
+function sheetHasProfitTable(sheet) {
+  const expensesColumns = CATEGORIES.length + 2;
+  const profitStartColumn = expensesColumns + 1;
+  const cellValue = sheet.getRange(1, profitStartColumn).getValue();
+  return cellValue && cellValue.toString().includes('PROFIT');
+}
+
+/**
+ * Adds the profit table to a specific sheet
+ */
+function addProfitTableToSheet(sheet, year) {
+  const expensesColumns = CATEGORIES.length + 2;
+  const profitStartColumn = expensesColumns + 2;
+  const profitStartColLetter = String.fromCharCode(65 + profitStartColumn - 1);
+  
+  const startRow = 1;
+  
+  sheet.getRange(startRow, profitStartColumn).setValue('MONTHLY PROFIT - ' + year)
+    .setFontWeight('bold').setFontSize(14).setBackground('#E8F0FE');
+  
+  const profitHeaders = ['Month', 'Square', 'Other', 'TOTAL'];
+  sheet.getRange(startRow + 1, profitStartColumn, 1, profitHeaders.length)
+    .setValues([profitHeaders])
+    .setFontWeight('bold')
+    .setBackground('#9C27B0')
+    .setFontColor('white');
+  
+  for (let i = 0; i < MONTHS.length; i++) {
+    const row = startRow + 2 + i;
+    sheet.getRange(row, profitStartColumn).setValue(MONTHS[i]);
+    
+    sheet.getRange(row, profitStartColumn + 1).setValue(0).setNumberFormat('$#,##0.00');
+    sheet.getRange(row, profitStartColumn + 2).setValue(0).setNumberFormat('$#,##0.00');
+    
+    const totalFormula = `=SUM(${String.fromCharCode(65 + profitStartColumn)}${row}:${String.fromCharCode(65 + profitStartColumn + 1)}${row})`;
+    sheet.getRange(row, profitStartColumn + 3).setFormula(totalFormula)
+      .setNumberFormat('$#,##0.00').setFontWeight('bold');
+  }
+  
+  const totalRow = startRow + 2 + MONTHS.length;
+  sheet.getRange(totalRow, profitStartColumn).setValue('ANNUAL TOTAL').setFontWeight('bold');
+  
+  for (let j = 0; j < profitHeaders.length - 1; j++) {
+    const col = profitStartColumn + j + 1;
+    const colLetter = String.fromCharCode(65 + col - 1);
+    const formula = `=SUM(${colLetter}${startRow + 2}:${colLetter}${totalRow - 1})`;
+    sheet.getRange(totalRow, col).setFormula(formula)
+      .setNumberFormat('$#,##0.00')
+      .setFontWeight('bold')
+      .setBackground('#FBBC04');
+  }
+  
+  const profitTableRange = sheet.getRange(startRow + 1, profitStartColumn, MONTHS.length + 2, profitHeaders.length);
+  profitTableRange.setBorder(true, true, true, true, true, true);
+}
+
+/**
+ * Adds a net results table that shows monthly and yearly net (profit - expenses)
+ * Works on all year-named sheets that have both expenses and profit tables
+ */
+function addNetResultsTable() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = ss.getSheets();
+  
+  const yearSheets = [];
+  for (const sheet of sheets) {
+    const sheetName = sheet.getName();
+    if (/^\d{4}$/.test(sheetName)) {
+      yearSheets.push(sheet);
+    }
+  }
+  
+  if (yearSheets.length === 0) {
+    SpreadsheetApp.getUi().alert('No year sheets found. Please initialize the spreadsheet first.');
+    return;
+  }
+  
+  let addedCount = 0;
+  let skippedExpenses = 0;
+  let skippedProfit = 0;
+  let skippedAlready = 0;
+  
+  for (const sheet of yearSheets) {
+    const sheetName = sheet.getName();
+    
+    if (!sheetHasExpensesTable(sheet)) {
+      skippedExpenses++;
+      continue;
+    }
+    
+    if (!sheetHasProfitTable(sheet)) {
+      skippedProfit++;
+      continue;
+    }
+    
+    if (sheetHasNetResultsTable(sheet)) {
+      skippedAlready++;
+      continue;
+    }
+    
+    addNetResultsTableToSheet(sheet, sheetName);
+    addedCount++;
+  }
+  
+  let message = '';
+  if (addedCount > 0) {
+    message += `Net results table added to ${addedCount} sheet(s).\n\n`;
+  }
+  if (skippedExpenses > 0) {
+    message += `${skippedExpenses} sheet(s) missing expenses table.\n`;
+  }
+  if (skippedProfit > 0) {
+    message += `${skippedProfit} sheet(s) missing profit table.\n`;
+  }
+  if (skippedAlready > 0) {
+    message += `${skippedAlready} sheet(s) already had net results table.`;
+  }
+  
+  SpreadsheetApp.getUi().alert(
+    'Net Results Table Update Complete',
+    message.trim(),
+    SpreadsheetApp.getUi().ButtonSet.OK
+  );
+}
+
+/**
+ * Checks if a sheet has an expenses table
+ */
+function sheetHasExpensesTable(sheet) {
+  const cellValue = sheet.getRange(1, 1).getValue();
+  return cellValue && cellValue.toString().includes('SPENDING');
+}
+
+/**
+ * Checks if a sheet already has a net results table
+ */
+function sheetHasNetResultsTable(sheet) {
+  const expensesColumns = CATEGORIES.length + 2;
+  const profitColumns = 4;
+  const netStartColumn = expensesColumns + 1 + profitColumns + 1;
+  const cellValue = sheet.getRange(1, netStartColumn).getValue();
+  return cellValue && cellValue.toString().includes('NET');
+}
+
+/**
+ * Adds the net results table to a specific sheet
+ */
+function addNetResultsTableToSheet(sheet, year) {
+  const expensesColumns = CATEGORIES.length + 2;
+  const profitColumns = 4;
+  const profitStartColumn = expensesColumns + 2;
+  const netStartColumn = profitStartColumn + profitColumns + 1;
+  
+  const startRow = 1;
+  
+  const expensesTotalCol = expensesColumns;
+  const profitTotalCol = profitStartColumn + 3;
+  const profitTotalColLetter = String.fromCharCode(64 + profitTotalCol);
+  const expensesTotalColLetter = String.fromCharCode(64 + expensesTotalCol);
+  
+  sheet.getRange(startRow, netStartColumn).setValue('MONTHLY NET RESULTS - ' + year)
+    .setFontWeight('bold').setFontSize(14).setBackground('#E8F0FE');
+  
+  const netHeaders = ['Month', 'Profit', 'Expenses', 'NET'];
+  sheet.getRange(startRow + 1, netStartColumn, 1, netHeaders.length)
+    .setValues([netHeaders])
+    .setFontWeight('bold')
+    .setBackground('#FF5722')
+    .setFontColor('white');
+  
+  for (let i = 0; i < MONTHS.length; i++) {
+    const row = startRow + 2 + i;
+    sheet.getRange(row, netStartColumn).setValue(MONTHS[i]);
+    
+    sheet.getRange(row, netStartColumn + 1).setFormula(`=${profitTotalColLetter}${row}`)
+      .setNumberFormat('$#,##0.00');
+    
+    sheet.getRange(row, netStartColumn + 2).setFormula(`=${expensesTotalColLetter}${row}`)
+      .setNumberFormat('$#,##0.00');
+    
+    const netColLetter = String.fromCharCode(64 + netStartColumn + 3);
+    const profitColLetter = String.fromCharCode(64 + netStartColumn + 1);
+    const expenseColLetter = String.fromCharCode(64 + netStartColumn + 2);
+    sheet.getRange(row, netStartColumn + 3).setFormula(`=${profitColLetter}${row}-${expenseColLetter}${row}`)
+      .setNumberFormat('$#,##0.00').setFontWeight('bold');
+  }
+  
+  const totalRow = startRow + 2 + MONTHS.length;
+  sheet.getRange(totalRow, netStartColumn).setValue('YEARLY NET').setFontWeight('bold');
+  
+  sheet.getRange(totalRow, netStartColumn + 1).setFormula(`=${profitTotalColLetter}${totalRow}`)
+    .setNumberFormat('$#,##0.00').setFontWeight('bold').setBackground('#FBBC04');
+  
+  sheet.getRange(totalRow, netStartColumn + 2).setFormula(`=${expensesTotalColLetter}${totalRow}`)
+    .setNumberFormat('$#,##0.00').setFontWeight('bold').setBackground('#FBBC04');
+  
+  const netColLetter = String.fromCharCode(64 + netStartColumn + 3);
+  const profitColLetter = String.fromCharCode(64 + netStartColumn + 1);
+  const expenseColLetter = String.fromCharCode(64 + netStartColumn + 2);
+  sheet.getRange(totalRow, netStartColumn + 3).setFormula(`=${profitColLetter}${totalRow}-${expenseColLetter}${totalRow}`)
+    .setNumberFormat('$#,##0.00').setFontWeight('bold').setBackground('#34A853').setFontColor('white');
+  
+  const netTableRange = sheet.getRange(startRow + 1, netStartColumn, MONTHS.length + 2, netHeaders.length);
+  netTableRange.setBorder(true, true, true, true, true, true);
+}
+
+/**
+ * Shows a dialog to insert a new transaction manually
+ */
+function insertTransaction() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const year = new Date().getFullYear();
+  
+  let sheet = ss.getSheetByName(year.toString());
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert('No sheet found for current year. Please initialize the spreadsheet first.');
+    return;
+  }
+  
+  const ui = SpreadsheetApp.getUi();
+  
+  const categoryList = CATEGORIES.join(', ');
+  
+  const response = ui.prompt(
+    'Insert Transaction',
+    'Enter transaction details (format: YYYY-MM-DD, Category, Amount, Your Name)\n\n' +
+    'Example: 2026-01-15, Retail Shelf, 125.50, Levi\n\n' +
+    `Valid categories: ${categoryList}`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  
+  if (response.getSelectedButton() !== ui.Button.OK) {
+    return;
+  }
+  
+  const input = response.getResponseText().trim();
+  const parts = input.split(',').map(s => s.trim());
+  
+  if (parts.length < 4) {
+    ui.alert('Error', 'Please enter all 4 fields: Date, Category, Amount, Your Name', ui.ButtonSet.OK);
+    return;
+  }
+  
+  const dateStr = parts[0];
+  const category = parts[1];
+  const amount = parseFloat(parts[2]);
+  const userName = parts[3];
+  
+  if (isNaN(amount) || amount < 0) {
+    ui.alert('Error', 'Amount must be a valid positive number', ui.ButtonSet.OK);
+    return;
+  }
+  
+  const date = new Date(dateStr);
+  if (isNaN(date.getTime())) {
+    ui.alert('Error', 'Invalid date format. Use YYYY-MM-DD', ui.ButtonSet.OK);
+    return;
+  }
+  
+  const month = MONTHS[date.getMonth()];
+  const transactionYear = date.getFullYear();
+  
+  if (transactionYear !== parseInt(year)) {
+    const confirm = ui.alert(
+      'Year Mismatch',
+      `This date is for year ${transactionYear}, but current sheet is for ${year}. Add anyway?`,
+      ui.ButtonSet.YES_NO
+    );
+    if (confirm !== ui.Button.YES) {
+      return;
+    }
+  }
+  
+  try {
+    addTransaction(sheet, date, month, category, amount, [], userName);
+    updateMonthlySummary(sheet, month, category, amount);
+    ui.alert('Success', `Transaction added:\n\nDate: ${dateStr}\nCategory: ${category}\nAmount: $${amount.toFixed(2)}\nBy: ${userName}`, ui.ButtonSet.OK);
+  } catch (error) {
+    ui.alert('Error', 'Failed to add transaction: ' + error.message, ui.ButtonSet.OK);
+  }
 }
 
 /**
