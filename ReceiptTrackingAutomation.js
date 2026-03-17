@@ -1,83 +1,41 @@
+debugFlag = true;
 /**
  * Creates custom menu in Google Sheets
  */
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
-  ui.createMenu('Receipt Tracking')
-    .addItem('🔧 Initialize Spreadsheet', 'initializeSpreadsheet')
-    .addItem('📊 Populate Test Data', 'populateTestData')
-    .addSeparator()
-    .addItem('📋 Show Valid Categories', 'showValidCategories')
-    .addItem('🆕 Test Dynamic Categories', 'testDynamicCategories')
-    .addItem('📂 Create Receipts Folder', 'createReceiptsFolderAndGetId')
+  ui.createMenu('Manage Transactions')
+    .addItem('Add Manual Entries to Sheet', 'applyManualEntries')
+    .addItem('Add Categories from Code', 'regenerateSheetCategories')
     .addToUi();
+  if (!debugFlag) {return;}
+  ui.createMenu('Receipt Tracking')
+    .addItem('Initialize Spreadsheet', 'initializeSpreadsheet')
+    .addItem('Add Profit Table', 'addProfitTable')
+    .addItem('Add Net Results Table', 'addNetResultsTable')
+    .addItem('Add Manual Entries Log (Migration)', 'addManualEntriesLogToSheet')
+    .addSeparator()
+    .addItem('Populate Test Data', 'populateTestData')
+    .addSeparator()
+    .addItem('Show Valid Categories', 'showValidCategories')
+    .addItem('Test Dynamic Categories', 'testDynamicCategories')
+    .addItem('Create Receipts Folder', 'createReceiptsFolderAndGetId')
+    .addToUi();
+  
 }
 
-// Map API keys to user names for tracking who added receipts
-const API_KEY_USERS = {
-  'replacewithyourkey': 'Levi',
-  'replacewithyourkey': 'Taylor',
-  'replacewithyourkey': 'Jim',
-  'replacewithyourkey': 'Bob',
-  'replacewithyourkey': 'Joe',
-};
+// CATEGORIES, CATEGORY_ALIASES → Config
+// API_KEY_USERS, RECEIPTS_FOLDER_ID → Config
 
-const RECEIPTS_FOLDER_ID = 'FileIDfromURL';
-
-// Spreadsheet header values (exact format)
-const CATEGORIES = ['Amazon', 'Gas', 'Employees', 'Rent', 'Asset Repair/Maintenance', 'Operating Supplies', 'Contracts', 'Misc'];
-
-// Map user-friendly input to spreadsheet categories
-const CATEGORY_ALIASES = {
-  // Products/Ingredients
-  'products': 'Products/Ingredients',
-  'ingredients': 'Products/Ingredients',
-  'product': 'Products/Ingredients',
-  'food': 'Products/Ingredients',
-
-  
-  // Gas
-  'gas': 'Gas',
-  'fuel': 'Gas',
-  
-  // Employees
-  'employees': 'Employees',
-  'employee': 'Employees',
-  'payroll': 'Employees',
-  'staff': 'Employees',
-  
-  // Rent
-  'rent': 'Rent',
-  
-  // Asset Repair/Maintenance
-  'repair': 'Asset Repair/Maintenance',
-  'maintenance': 'Asset Repair/Maintenance',
-  'repairs': 'Asset Repair/Maintenance',
-  'fix': 'Asset Repair/Maintenance',
-  'asset': 'Asset Repair/Maintenance',
-  
-  // Operating Supplies
-  'supplies': 'Operating Supplies',
-  'supply': 'Operating Supplies',
-  'operating supplies': 'Operating Supplies',
-  
-  // Contracts
-  'contracts': 'Contracts',
-  'contract': 'Contracts',
-  'service': 'Contracts',
-  'services': 'Contracts',
-  
-  // Misc
-  'misc': 'Misc',
-  'miscellaneous': 'Misc',
-  'other': 'Misc',
-};
-
-const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
                 'July', 'August', 'September', 'October', 'November', 'December'];
+
+const MANUAL_LOG_START_COL = 9; // Column I — manual entries log (to the right of the transaction log)
 
 /**
  * Main function - accepts photo as base64 string
+ * Params:
+ * date, category, amount, apiKey, photosBase64
  */
 function doPost(e) {
   try {
@@ -267,7 +225,7 @@ function uploadPhotoToDrive(base64Data, dateString, category, userName, photoInd
   let monthFolder = getOrCreateFolder(yearFolder, month);
   
   // Create filename with timestamp
-  const timestamp = Utilities.formatDate(date, Session.getScriptTimeZone(), 'yyyy-MM-dd_HH-mm-ss');
+  const timestamp = Utilities.formatDate(date, 'America/Chicago', 'yyyy-MM-dd_HH-mm-ss');
   const filename = photoIndex > 0 
     ? `receipt_${category}_${timestamp}_${photoIndex + 1}.jpg`
     : `receipt_${category}_${timestamp}.jpg`;
@@ -327,65 +285,82 @@ function addReceipt(dateString, category, amount, fileLinks, userName) {
   }
   
   // Check if category exists in sheet, add if new
-  ensureCategoryExists(sheet, category);
-  
+  const categoryReady = ensureCategoryExists(sheet, category);
+  if (!categoryReady) {
+    // Category doesn't exist and can't be added (past year sheet)
+    const headers = sheet.getRange(2, 1, 1, sheet.getLastColumn()).getValues()[0];
+    if (!headers.includes(category)) {
+      throw new Error(`Category "${category}" does not exist in the ${year} sheet. Past year sheets cannot have new categories added.`);
+    }
+  }
+
   // Add transaction to log
   addTransaction(sheet, date, month, category, amount, fileLinks, userName);
-  
+
   // Update monthly summary table
   updateMonthlySummary(sheet, month, category, amount);
-  
+
   return `Receipt logged: ${category} - $${amount} for ${month} ${year}`;
 }
 
 /**
- * Ensures a category exists in the sheet, adds it if it doesn't
+ * Ensures a category exists in the sheet, adds it if it doesn't.
+ * Returns true if the category exists (or was added), false if blocked (past year).
  */
 function ensureCategoryExists(sheet, category) {
+  // Only add new categories to current year and future sheets
+  const sheetYear = parseInt(sheet.getName());
+  const currentYear = new Date().getFullYear();
+  if (!isNaN(sheetYear) && sheetYear < currentYear) {
+    Logger.log(`Category "${category}" not added to past year sheet ${sheetYear}`);
+    return false;
+  }
+
   // Get current categories from header row (row 2)
   const headerRow = 2;
   const headerRange = sheet.getRange(headerRow, 1, 1, sheet.getLastColumn());
   const headers = headerRange.getValues()[0];
-  
+
   // Check if category already exists
   const categoryExists = headers.includes(category);
-  
+
   if (!categoryExists) {
     // Find the column before TOTAL (last column)
     const totalColumn = headers.indexOf('TOTAL');
     const insertColumn = totalColumn > -1 ? totalColumn : headers.length;
-    
+
     // Insert new column for the category
     sheet.insertColumnBefore(insertColumn + 1);
-    
-    // Add category header
+
+    // Add category header in main summary
     sheet.getRange(headerRow, insertColumn + 1).setValue(category)
       .setFontWeight('bold')
       .setBackground('#34A853')
       .setFontColor('white');
-    
+
     // Initialize all month rows with 0 for this category
     const firstMonthRow = 3;
     const lastMonthRow = firstMonthRow + MONTHS.length - 1;
-    
+
     for (let row = firstMonthRow; row <= lastMonthRow; row++) {
       sheet.getRange(row, insertColumn + 1).setValue(0).setNumberFormat('$#,##0.00');
     }
-    
+
     // Update annual total row
     const annualTotalRow = lastMonthRow + 1;
-    const colLetter = String.fromCharCode(65 + insertColumn);
+    const colLetter = columnToLetter(insertColumn + 1);
     const formula = `=SUM(${colLetter}${firstMonthRow}:${colLetter}${lastMonthRow})`;
     sheet.getRange(annualTotalRow, insertColumn + 1).setFormula(formula)
       .setNumberFormat('$#,##0.00')
       .setFontWeight('bold')
       .setBackground('#FBBC04');
-    
+
     // Update TOTAL column formulas to include new category
     updateTotalFormulas(sheet, insertColumn + 1);
-    
+
     Logger.log(`Added new category "${category}" to sheet`);
   }
+  return true;
 }
 
 /**
@@ -411,30 +386,112 @@ function updateTotalFormulas(sheet, newCategoryColumn) {
 }
 
 /**
+ * Builds the manual entries log to the right of the transaction log (cols I-M).
+ * Includes date picker validation and category dropdown.
+ * Called once during sheet creation; also used to add the log to existing sheets.
+ */
+function createManualEntriesLog(sheet, year) {
+  const titleRow = findTransactionLogStartRow(sheet) - 2; // same row as TX LOG title
+  const headerRow = titleRow + 1;
+  const firstDataRow = titleRow + 2;
+
+  // Title - merged across 5 manual log columns
+  sheet.getRange(titleRow, MANUAL_LOG_START_COL, 1, 5).merge()
+    .setValue('MANUAL ENTRIES - ' + year)
+    .setFontWeight('bold').setFontSize(14);
+
+  // Headers
+  sheet.getRange(headerRow, MANUAL_LOG_START_COL, 1, 5)
+    .setValues([['Date', 'Category', 'Amount', 'Note', 'Added By']])
+    .setFontWeight('bold')
+    .setBackground('#34A853')
+    .setFontColor('white');
+
+  const bufferRows = 200;
+
+  // Date validation — triggers calendar picker in Sheets
+  const dateRange = sheet.getRange(firstDataRow, MANUAL_LOG_START_COL, bufferRows, 1);
+  const dateRule = SpreadsheetApp.newDataValidation()
+    .requireDate()
+    .setAllowInvalid(false)
+    .build();
+  dateRange.setDataValidation(dateRule).setNumberFormat('MM/dd/yyyy');
+
+  // Category dropdown from CATEGORIES array
+  const catRange = sheet.getRange(firstDataRow, MANUAL_LOG_START_COL + 1, bufferRows, 1);
+  const catRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(CATEGORIES, true)
+    .setAllowInvalid(true)
+    .build();
+  catRange.setDataValidation(catRule);
+
+  // Amount column — currency format, supports negatives
+  sheet.getRange(firstDataRow, MANUAL_LOG_START_COL + 2, bufferRows, 1)
+    .setNumberFormat('$#,##0.00');
+
+  // Column widths for the manual log
+  sheet.setColumnWidth(MANUAL_LOG_START_COL, 110);     // Date
+  sheet.setColumnWidth(MANUAL_LOG_START_COL + 1, 130); // Category
+  sheet.setColumnWidth(MANUAL_LOG_START_COL + 2, 100); // Amount
+  sheet.setColumnWidth(MANUAL_LOG_START_COL + 3, 180); // Note
+  sheet.setColumnWidth(MANUAL_LOG_START_COL + 4, 100); // Added By
+}
+
+/**
+ * Re-applies the category dropdown validation to the manual log after
+ * the CATEGORIES array changes (called by regenerateSheetCategories).
+ */
+function refreshManualLogValidation(sheet) {
+  const firstDataRow = findTransactionLogStartRow(sheet);
+  const manualStartCol = findManualLogStartCol(sheet);
+  const catRange = sheet.getRange(firstDataRow, manualStartCol + 1, 200, 1);
+  const catRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(CATEGORIES, true)
+    .setAllowInvalid(true)
+    .build();
+  catRange.setDataValidation(catRule);
+}
+
+/**
+ * Converts a 1-based column number to a letter (e.g. 1→A, 26→Z, 27→AA)
+ */
+function columnToLetter(col) {
+  let letter = '';
+  while (col > 0) {
+    const remainder = (col - 1) % 26;
+    letter = String.fromCharCode(65 + remainder) + letter;
+    col = Math.floor((col - 1) / 26);
+  }
+  return letter;
+}
+
+/**
  * Creates a new sheet for the year with proper structure
- * 
+ *
  * SHEET LAYOUT:
  * Rows 1-15:  Monthly Summary Table (title, headers, 12 months, annual total)
  * Row 16:     Blank row for spacing
- * Rows 17-18: Transaction Log header
- * Row 19+:    Transaction entries (unlimited)
+ * Row 17:     Transaction Log title (col A) | Manual Entries title (col I)
+ * Row 18:     TX log headers (cols A-G)     | Manual log headers  (cols I-M)
+ * Row 19+:    Transaction entries            | Manual entry rows
  */
 function createYearSheet(spreadsheet, year) {
   const sheet = spreadsheet.insertSheet(year.toString());
-  
-  // Create Monthly Summary Table FIRST (at top)
+
+  // Create Monthly Summary Table (rows 1-15)
   createMonthlySummaryTable(sheet, year);
-  
-  // Set up Transaction Log header (below summary table)
-  // Summary takes rows 1-15, add blank row 16, transaction log starts row 17
-  const transactionStartRow = 17;
-  sheet.getRange(transactionStartRow, 1).setValue('TRANSACTION LOG - ' + year)
+
+  // Transaction Log header (cols A-G, rows 17-18)
+  sheet.getRange(17, 1).setValue('TRANSACTION LOG - ' + year)
     .setFontWeight('bold').setFontSize(14);
-  sheet.getRange(transactionStartRow + 1, 1, 1, 7).setValues([[
+  sheet.getRange(18, 1, 1, 7).setValues([[
     'Date', 'Month', 'Category', 'Amount', 'Receipt Link', 'Added By', 'Notes'
   ]]).setFontWeight('bold').setBackground('#4285F4').setFontColor('white');
-  
-  // Freeze summary table and transaction header (15 rows summary + 3 rows for transaction header)
+
+  // Manual Entries Log (cols I-M, same rows 17-18+)
+  createManualEntriesLog(sheet, year);
+
+  // Freeze rows through transaction log header
   sheet.setFrozenRows(18);
   
   // Set column widths
@@ -505,12 +562,399 @@ function createMonthlySummaryTable(sheet, year) {
 }
 
 /**
+ * Adds a profit table 2 columns to the right of the expenses table
+ * Works on all year-named sheets that don't already have the table
+ */
+function addProfitTable() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = ss.getSheets();
+  
+  const yearSheets = [];
+  for (const sheet of sheets) {
+    const sheetName = sheet.getName();
+    if (/^\d{4}$/.test(sheetName)) {
+      yearSheets.push(sheet);
+    }
+  }
+  
+  if (yearSheets.length === 0) {
+    SpreadsheetApp.getUi().alert('No year sheets found. Please initialize the spreadsheet first.');
+    return;
+  }
+  
+  let addedCount = 0;
+  let skippedCount = 0;
+  let skippedPastCount = 0;
+  const currentYear = new Date().getFullYear();
+
+  for (const sheet of yearSheets) {
+    const sheetName = sheet.getName();
+
+    if (parseInt(sheetName) < currentYear) {
+      skippedPastCount++;
+      continue;
+    }
+
+    if (sheetHasProfitTable(sheet)) {
+      skippedCount++;
+      continue;
+    }
+
+    addProfitTableToSheet(sheet, sheetName);
+    addedCount++;
+  }
+
+  let message = '';
+  if (addedCount > 0) {
+    message += `Profit table added to ${addedCount} sheet(s).\n\n`;
+  }
+  if (skippedCount > 0) {
+    message += `${skippedCount} sheet(s) already had the profit table.\n`;
+  }
+  if (skippedPastCount > 0) {
+    message += `${skippedPastCount} past year sheet(s) skipped.`;
+  }
+  
+  SpreadsheetApp.getUi().alert(
+    'Profit Table Update Complete',
+    message.trim(),
+    SpreadsheetApp.getUi().ButtonSet.OK
+  );
+}
+
+/**
+ * Checks if a sheet already has a profit table
+ */
+function sheetHasProfitTable(sheet) {
+  const expensesColumns = CATEGORIES.length + 2;
+  const profitStartColumn = expensesColumns + 1;
+  const cellValue = sheet.getRange(1, profitStartColumn).getValue();
+  return cellValue && cellValue.toString().includes('PROFIT');
+}
+
+/**
+ * Adds the profit table to a specific sheet
+ */
+function addProfitTableToSheet(sheet, year) {
+  const expensesColumns = CATEGORIES.length + 2;
+  const profitStartColumn = expensesColumns + 2;
+  const profitStartColLetter = String.fromCharCode(65 + profitStartColumn - 1);
+  
+  const startRow = 1;
+  
+  sheet.getRange(startRow, profitStartColumn).setValue('MONTHLY PROFIT - ' + year)
+    .setFontWeight('bold').setFontSize(14).setBackground('#E8F0FE');
+  
+  const profitHeaders = ['Month', 'Square', 'Other', 'TOTAL'];
+  sheet.getRange(startRow + 1, profitStartColumn, 1, profitHeaders.length)
+    .setValues([profitHeaders])
+    .setFontWeight('bold')
+    .setBackground('#9C27B0')
+    .setFontColor('white');
+  
+  for (let i = 0; i < MONTHS.length; i++) {
+    const row = startRow + 2 + i;
+    sheet.getRange(row, profitStartColumn).setValue(MONTHS[i]);
+    
+    sheet.getRange(row, profitStartColumn + 1).setValue(0).setNumberFormat('$#,##0.00');
+    sheet.getRange(row, profitStartColumn + 2).setValue(0).setNumberFormat('$#,##0.00');
+    
+    const totalFormula = `=SUM(${String.fromCharCode(65 + profitStartColumn)}${row}:${String.fromCharCode(65 + profitStartColumn + 1)}${row})`;
+    sheet.getRange(row, profitStartColumn + 3).setFormula(totalFormula)
+      .setNumberFormat('$#,##0.00').setFontWeight('bold');
+  }
+  
+  const totalRow = startRow + 2 + MONTHS.length;
+  sheet.getRange(totalRow, profitStartColumn).setValue('ANNUAL TOTAL').setFontWeight('bold');
+  
+  for (let j = 0; j < profitHeaders.length - 1; j++) {
+    const col = profitStartColumn + j + 1;
+    const colLetter = String.fromCharCode(65 + col - 1);
+    const formula = `=SUM(${colLetter}${startRow + 2}:${colLetter}${totalRow - 1})`;
+    sheet.getRange(totalRow, col).setFormula(formula)
+      .setNumberFormat('$#,##0.00')
+      .setFontWeight('bold')
+      .setBackground('#FBBC04');
+  }
+  
+  const profitTableRange = sheet.getRange(startRow + 1, profitStartColumn, MONTHS.length + 2, profitHeaders.length);
+  profitTableRange.setBorder(true, true, true, true, true, true);
+}
+
+/**
+ * Adds a net results table that shows monthly and yearly net (profit - expenses)
+ * Works on all year-named sheets that have both expenses and profit tables
+ */
+function addNetResultsTable() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = ss.getSheets();
+  
+  const yearSheets = [];
+  for (const sheet of sheets) {
+    const sheetName = sheet.getName();
+    if (/^\d{4}$/.test(sheetName)) {
+      yearSheets.push(sheet);
+    }
+  }
+  
+  if (yearSheets.length === 0) {
+    SpreadsheetApp.getUi().alert('No year sheets found. Please initialize the spreadsheet first.');
+    return;
+  }
+  
+  let addedCount = 0;
+  let skippedExpenses = 0;
+  let skippedProfit = 0;
+  let skippedAlready = 0;
+  let skippedPastCount = 0;
+  const currentYear = new Date().getFullYear();
+
+  for (const sheet of yearSheets) {
+    const sheetName = sheet.getName();
+
+    if (parseInt(sheetName) < currentYear) {
+      skippedPastCount++;
+      continue;
+    }
+
+    if (!sheetHasExpensesTable(sheet)) {
+      skippedExpenses++;
+      continue;
+    }
+
+    if (!sheetHasProfitTable(sheet)) {
+      skippedProfit++;
+      continue;
+    }
+
+    if (sheetHasNetResultsTable(sheet)) {
+      skippedAlready++;
+      continue;
+    }
+
+    addNetResultsTableToSheet(sheet, sheetName);
+    addedCount++;
+  }
+
+  let message = '';
+  if (addedCount > 0) {
+    message += `Net results table added to ${addedCount} sheet(s).\n\n`;
+  }
+  if (skippedExpenses > 0) {
+    message += `${skippedExpenses} sheet(s) missing expenses table.\n`;
+  }
+  if (skippedProfit > 0) {
+    message += `${skippedProfit} sheet(s) missing profit table.\n`;
+  }
+  if (skippedAlready > 0) {
+    message += `${skippedAlready} sheet(s) already had net results table.\n`;
+  }
+  if (skippedPastCount > 0) {
+    message += `${skippedPastCount} past year sheet(s) skipped.`;
+  }
+  
+  SpreadsheetApp.getUi().alert(
+    'Net Results Table Update Complete',
+    message.trim(),
+    SpreadsheetApp.getUi().ButtonSet.OK
+  );
+}
+
+/**
+ * Checks if a sheet has an expenses table
+ */
+function sheetHasExpensesTable(sheet) {
+  const cellValue = sheet.getRange(1, 1).getValue();
+  return cellValue && cellValue.toString().includes('SPENDING');
+}
+
+/**
+ * Checks if a sheet already has a net results table
+ */
+function sheetHasNetResultsTable(sheet) {
+  const expensesColumns = CATEGORIES.length + 2;
+  const profitColumns = 4;
+  const netStartColumn = expensesColumns + 1 + profitColumns + 1;
+  const cellValue = sheet.getRange(1, netStartColumn).getValue();
+  return cellValue && cellValue.toString().includes('NET');
+}
+
+/**
+ * Adds the net results table to a specific sheet
+ */
+function addNetResultsTableToSheet(sheet, year) {
+  const expensesColumns = CATEGORIES.length + 2;
+  const profitColumns = 4;
+  const profitStartColumn = expensesColumns + 2;
+  const netStartColumn = profitStartColumn + profitColumns + 1;
+  
+  const startRow = 1;
+  
+  const expensesTotalCol = expensesColumns;
+  const profitTotalCol = profitStartColumn + 3;
+  const profitTotalColLetter = String.fromCharCode(64 + profitTotalCol);
+  const expensesTotalColLetter = String.fromCharCode(64 + expensesTotalCol);
+  
+  sheet.getRange(startRow, netStartColumn).setValue('MONTHLY NET RESULTS - ' + year)
+    .setFontWeight('bold').setFontSize(14).setBackground('#E8F0FE');
+  
+  const netHeaders = ['Month', 'Profit', 'Expenses', 'NET'];
+  sheet.getRange(startRow + 1, netStartColumn, 1, netHeaders.length)
+    .setValues([netHeaders])
+    .setFontWeight('bold')
+    .setBackground('#FF5722')
+    .setFontColor('white');
+  
+  for (let i = 0; i < MONTHS.length; i++) {
+    const row = startRow + 2 + i;
+    sheet.getRange(row, netStartColumn).setValue(MONTHS[i]);
+    
+    sheet.getRange(row, netStartColumn + 1).setFormula(`=${profitTotalColLetter}${row}`)
+      .setNumberFormat('$#,##0.00');
+    
+    sheet.getRange(row, netStartColumn + 2).setFormula(`=${expensesTotalColLetter}${row}`)
+      .setNumberFormat('$#,##0.00');
+    
+    const netColLetter = String.fromCharCode(64 + netStartColumn + 3);
+    const profitColLetter = String.fromCharCode(64 + netStartColumn + 1);
+    const expenseColLetter = String.fromCharCode(64 + netStartColumn + 2);
+    sheet.getRange(row, netStartColumn + 3).setFormula(`=${profitColLetter}${row}-${expenseColLetter}${row}`)
+      .setNumberFormat('$#,##0.00').setFontWeight('bold');
+  }
+  
+  const totalRow = startRow + 2 + MONTHS.length;
+  sheet.getRange(totalRow, netStartColumn).setValue('YEARLY NET').setFontWeight('bold');
+  
+  sheet.getRange(totalRow, netStartColumn + 1).setFormula(`=${profitTotalColLetter}${totalRow}`)
+    .setNumberFormat('$#,##0.00').setFontWeight('bold').setBackground('#FBBC04');
+  
+  sheet.getRange(totalRow, netStartColumn + 2).setFormula(`=${expensesTotalColLetter}${totalRow}`)
+    .setNumberFormat('$#,##0.00').setFontWeight('bold').setBackground('#FBBC04');
+  
+  const netColLetter = String.fromCharCode(64 + netStartColumn + 3);
+  const profitColLetter = String.fromCharCode(64 + netStartColumn + 1);
+  const expenseColLetter = String.fromCharCode(64 + netStartColumn + 2);
+  sheet.getRange(totalRow, netStartColumn + 3).setFormula(`=${profitColLetter}${totalRow}-${expenseColLetter}${totalRow}`)
+    .setNumberFormat('$#,##0.00').setFontWeight('bold').setBackground('#34A853').setFontColor('white');
+  
+  const netTableRange = sheet.getRange(startRow + 1, netStartColumn, MONTHS.length + 2, netHeaders.length);
+  netTableRange.setBorder(true, true, true, true, true, true);
+}
+
+/**
+ * Shows a dialog to insert a new transaction manually
+ */
+function insertTransaction() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const year = new Date().getFullYear();
+  
+  let sheet = ss.getSheetByName(year.toString());
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert('No sheet found for current year. Please initialize the spreadsheet first.');
+    return;
+  }
+  
+  const ui = SpreadsheetApp.getUi();
+  
+  const categoryList = CATEGORIES.join(', ');
+  
+  const response = ui.prompt(
+    'Insert Transaction',
+    'Enter transaction details (format: YYYY-MM-DD, Category, Amount, Your Name)\n\n' +
+    'Example: 2026-01-15, Retail Shelf, 125.50, Levi\n\n' +
+    `Valid categories: ${categoryList}`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  
+  if (response.getSelectedButton() !== ui.Button.OK) {
+    return;
+  }
+  
+  const input = response.getResponseText().trim();
+  const parts = input.split(',').map(s => s.trim());
+  
+  if (parts.length < 4) {
+    ui.alert('Error', 'Please enter all 4 fields: Date, Category, Amount, Your Name', ui.ButtonSet.OK);
+    return;
+  }
+  
+  const dateStr = parts[0];
+  const category = parts[1];
+  const amount = parseFloat(parts[2]);
+  const userName = parts[3];
+  
+  if (isNaN(amount) || amount < 0) {
+    ui.alert('Error', 'Amount must be a valid positive number', ui.ButtonSet.OK);
+    return;
+  }
+  
+  const date = new Date(dateStr);
+  if (isNaN(date.getTime())) {
+    ui.alert('Error', 'Invalid date format. Use YYYY-MM-DD', ui.ButtonSet.OK);
+    return;
+  }
+  
+  const month = MONTHS[date.getMonth()];
+  const transactionYear = date.getFullYear();
+  
+  if (transactionYear !== parseInt(year)) {
+    const confirm = ui.alert(
+      'Year Mismatch',
+      `This date is for year ${transactionYear}, but current sheet is for ${year}. Add anyway?`,
+      ui.ButtonSet.YES_NO
+    );
+    if (confirm !== ui.Button.YES) {
+      return;
+    }
+  }
+  
+  try {
+    addTransaction(sheet, date, month, category, amount, [], userName);
+    updateMonthlySummary(sheet, month, category, amount);
+    ui.alert('Success', `Transaction added:\n\nDate: ${dateStr}\nCategory: ${category}\nAmount: $${amount.toFixed(2)}\nBy: ${userName}`, ui.ButtonSet.OK);
+  } catch (error) {
+    ui.alert('Error', 'Failed to add transaction: ' + error.message, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * Finds the first data row of the transaction log.
+ * Handles both old layout (tx log at row 17, data at 19) and
+ * new layout (tx log at row 32, data at 34) by scanning for the title.
+ */
+function findTransactionLogStartRow(sheet) {
+  for (let row = 15; row < 50; row++) {
+    const val = sheet.getRange(row, 1).getValue();
+    if (val && val.toString().startsWith('TRANSACTION LOG')) {
+      return row + 2; // title row + header row + 1 = first data row
+    }
+  }
+  return 19; // fallback: original layout (tx log title at row 17, data at row 19)
+}
+
+/**
+ * Dynamically finds the starting column of the manual entries log by scanning
+ * the title row for a cell containing "MANUAL ENTRIES". Falls back to
+ * MANUAL_LOG_START_COL if not found (e.g. during initial creation).
+ */
+function findManualLogStartCol(sheet) {
+  const titleRow = findTransactionLogStartRow(sheet) - 2;
+  const lastCol = sheet.getLastColumn();
+  for (let col = 2; col <= lastCol; col++) {
+    const val = sheet.getRange(titleRow, col).getValue();
+    if (val && val.toString().startsWith('MANUAL ENTRIES')) {
+      return col;
+    }
+  }
+  return MANUAL_LOG_START_COL; // fallback to constant if log not yet created
+}
+
+/**
  * Adds a transaction to the log
  */
 function addTransaction(sheet, date, month, category, amount, fileLinks, userName) {
-  // Find the next empty row in transaction log
-  // Summary takes rows 1-15, transaction header at rows 17-18, data starts at row 19
-  let lastRow = 19;
+  // Find the next empty row in transaction log (dynamic for old/new layout)
+  let lastRow = findTransactionLogStartRow(sheet);
   while (sheet.getRange(lastRow, 1).getValue() !== '') {
     lastRow++;
     if (lastRow > 10000) break; // Safety check
@@ -587,6 +1031,293 @@ function updateMonthlySummary(sheet, month, category, amount) {
 }
 
 /**
+ * Reads unapplied rows from the manual entries log (cols I-M), confirms with
+ * the user, applies each to the monthly summary, and marks the rows green.
+ */
+function applyManualEntries() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getActiveSheet();
+  const ui = SpreadsheetApp.getUi();
+
+  if (!/^\d{4}$/.test(sheet.getName())) {
+    ui.alert('Wrong Sheet', 'Navigate to a year sheet (e.g. "2026") first.', ui.ButtonSet.OK);
+    return;
+  }
+
+  const firstDataRow = findTransactionLogStartRow(sheet);
+  const manualStartCol = findManualLogStartCol(sheet);
+  const sheetYear = sheet.getName();
+
+  // Scan all manual log columns to find the last row with any data,
+  // since the date column might be empty while other columns have values.
+  const scanRows = Math.min(2000, sheet.getMaxRows() - firstDataRow + 1);
+  const manualColData = sheet.getRange(firstDataRow, manualStartCol, scanRows, 5).getValues();
+  let lastManualRow = firstDataRow - 1;
+  for (let i = manualColData.length - 1; i >= 0; i--) {
+    if (manualColData[i].some(cell => cell !== '')) {
+      lastManualRow = firstDataRow + i;
+      break;
+    }
+  }
+
+  const pending = [];
+
+  for (let row = firstDataRow; row <= lastManualRow; row++) {
+    const dateVal = sheet.getRange(row, manualStartCol).getValue();
+    const category = sheet.getRange(row, manualStartCol + 1).getValue();
+    const amount = sheet.getRange(row, manualStartCol + 2).getValue();
+    const note = sheet.getRange(row, manualStartCol + 3).getValue();
+
+    if (!dateVal || !category || amount === '' || amount === null) continue;
+
+    // Skip already-applied rows (marked green)
+    const bg = sheet.getRange(row, manualStartCol).getBackground();
+    if (bg === '#b7e1cd') continue;
+
+    const date = new Date(dateVal);
+    if (isNaN(date.getTime())) continue;
+
+    const entryYear = date.getFullYear().toString();
+    if (entryYear !== sheetYear) {
+      Logger.log(`Manual entry row ${row} has date from ${entryYear}, skipped on ${sheetYear} sheet`);
+      continue;
+    }
+
+    const numericAmount = parseFloat(amount);
+    if (isNaN(numericAmount)) continue;
+
+    const month = MONTHS[date.getMonth()];
+    pending.push({ row, date, month, category, amount: numericAmount, note });
+  }
+
+  if (pending.length === 0) {
+    ui.alert('No Entries', 'No unapplied manual entries found in the log.', ui.ButtonSet.OK);
+    return;
+  }
+
+  const lines = pending.map(p => {
+    const dateStr = Utilities.formatDate(p.date, Session.getScriptTimeZone(), 'MM/dd');
+    const sign = p.amount >= 0 ? '+' : '';
+    const noteStr = p.note ? `  (${p.note})` : '';
+    return `${dateStr} / ${p.category}: ${sign}${p.amount.toFixed(2)}${noteStr}`;
+  });
+
+  const confirm = ui.alert(
+    'Apply Manual Entries',
+    `Apply ${pending.length} entr(ies) to the monthly summary?\n\n${lines.join('\n')}`,
+    ui.ButtonSet.YES_NO
+  );
+  if (confirm !== ui.Button.YES) return;
+
+  const mainHeaders = sheet.getRange(2, 1, 1, sheet.getLastColumn()).getValues()[0];
+
+  for (const p of pending) {
+    if (!mainHeaders.includes(p.category)) {
+      Logger.log(`Category "${p.category}" not in summary header, skipping row ${p.row}`);
+      continue;
+    }
+    updateMonthlySummary(sheet, p.month, p.category, p.amount);
+    // Mark row as applied with light green background
+    sheet.getRange(p.row, manualStartCol, 1, 5).setBackground('#b7e1cd');
+  }
+
+  ui.alert('Done', `${pending.length} new item(s) applied to the monthly summary.`, ui.ButtonSet.OK);
+}
+
+/**
+ * Rebuilds the monthly summary table headers and adjustments table headers
+ * from the current CATEGORIES array, preserving existing cell values for
+ * categories that are still present.
+ */
+function regenerateSheetCategories() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getActiveSheet();
+  const ui = SpreadsheetApp.getUi();
+
+  if (!/^\d{4}$/.test(sheet.getName())) {
+    ui.alert('Wrong Sheet', 'Navigate to a year sheet (e.g. "2026") first.', ui.ButtonSet.OK);
+    return;
+  }
+
+  // Read current sheet categories from header row — only up to the TOTAL column
+  // to avoid picking up profit/net table headers that also live in row 2.
+  const currentHeaders = sheet.getRange(2, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const totalColIdx = currentHeaders.indexOf('TOTAL'); // 0-based
+  const expenseHeaders = totalColIdx !== -1 ? currentHeaders.slice(0, totalColIdx) : currentHeaders;
+  const sheetCategories = expenseHeaders.filter(h => h && h !== 'Month');
+  const totalCols = sheet.getLastColumn();
+
+  // Capture main summary data keyed by [month][category]
+  const savedData = {};
+  for (let i = 0; i < MONTHS.length; i++) {
+    const month = MONTHS[i];
+    savedData[month] = {};
+    for (const cat of sheetCategories) {
+      const colIdx = currentHeaders.indexOf(cat);
+      if (colIdx !== -1) {
+        savedData[month][cat] = sheet.getRange(3 + i, colIdx + 1).getValue() || 0;
+      }
+    }
+  }
+
+  // Compute diff
+  const surviving = CATEGORIES.filter(c => sheetCategories.includes(c));
+  const dropped = sheetCategories.filter(c => !CATEGORIES.includes(c));
+  const added = CATEGORIES.filter(c => !sheetCategories.includes(c));
+
+  let confirmMsg = 'Reorganize the summary table to match the CATEGORIES array.\n\n';
+  if (surviving.length) confirmMsg += `Keeping (data preserved): ${surviving.join(', ')}\n`;
+  if (added.length) confirmMsg += `Adding (fresh $0.00): ${added.join(', ')}\n`;
+  if (dropped.length) confirmMsg += `Removing (data will be lost): ${dropped.join(', ')}\n`;
+  confirmMsg += '\nContinue?';
+
+  const confirm = ui.alert('Regenerate Categories', confirmMsg, ui.ButtonSet.YES_NO);
+  if (confirm !== ui.Button.YES) return;
+
+  // Clear main summary area (rows 2-15, all cols up to current last col)
+  sheet.getRange(2, 1, 14, totalCols).clear();
+
+  // Rebuild header row 2
+  const newHeaders = ['Month', ...CATEGORIES, 'TOTAL'];
+  sheet.getRange(2, 1, 1, newHeaders.length)
+    .setValues([newHeaders])
+    .setFontWeight('bold')
+    .setBackground('#34A853')
+    .setFontColor('white');
+
+  // Rebuild month rows 3-14
+  for (let i = 0; i < MONTHS.length; i++) {
+    const row = 3 + i;
+    const month = MONTHS[i];
+    sheet.getRange(row, 1).setValue(month);
+
+    for (let j = 0; j < CATEGORIES.length; j++) {
+      const cat = CATEGORIES[j];
+      const value = surviving.includes(cat) ? (savedData[month][cat] || 0) : 0;
+      sheet.getRange(row, 2 + j).setValue(value).setNumberFormat('$#,##0.00');
+    }
+
+    // TOTAL formula
+    const totalCol = 2 + CATEGORIES.length;
+    const lastCatLetter = columnToLetter(totalCol - 1);
+    sheet.getRange(row, totalCol)
+      .setFormula(`=SUM(B${row}:${lastCatLetter}${row})`)
+      .setNumberFormat('$#,##0.00')
+      .setFontWeight('bold');
+  }
+
+  // Rebuild annual total row (row 15)
+  sheet.getRange(15, 1).setValue('ANNUAL TOTAL').setFontWeight('bold');
+  for (let j = 0; j <= CATEGORIES.length; j++) {
+    const col = 2 + j;
+    const colLetter = columnToLetter(col);
+    sheet.getRange(15, col)
+      .setFormula(`=SUM(${colLetter}3:${colLetter}14)`)
+      .setNumberFormat('$#,##0.00')
+      .setFontWeight('bold')
+      .setBackground('#FBBC04');
+  }
+
+  // Clear orphaned columns between end of new expenses table and wherever profit table starts
+  // (or to totalCols if no profit table). This removes stale expense columns without
+  // touching the profit table data we're about to relocate.
+  const newTableWidth = newHeaders.length;
+
+  // Find profit table's current column by scanning row 1 for "PROFIT"
+  let oldProfitStartCol = -1;
+  const row1Values = sheet.getRange(1, 1, 1, totalCols).getValues()[0];
+  for (let c = 0; c < row1Values.length; c++) {
+    if (row1Values[c] && row1Values[c].toString().includes('PROFIT')) {
+      oldProfitStartCol = c + 1; // 1-based
+      break;
+    }
+  }
+
+  // Save profit table data (Square + Other, rows 3-14) before clearing
+  const savedProfitData = []; // array of [square, other] per month
+  let hasProfitTable = oldProfitStartCol !== -1;
+  if (hasProfitTable) {
+    for (let i = 0; i < MONTHS.length; i++) {
+      const row = 3 + i;
+      const square = sheet.getRange(row, oldProfitStartCol + 1).getValue();
+      const other = sheet.getRange(row, oldProfitStartCol + 2).getValue();
+      savedProfitData.push([square, other]);
+    }
+  }
+
+  // Find net results table's current column (for clearing)
+  let oldNetStartCol = -1;
+  for (let c = 0; c < row1Values.length; c++) {
+    if (row1Values[c] && row1Values[c].toString().includes('NET')) {
+      oldNetStartCol = c + 1;
+      break;
+    }
+  }
+
+  // Clear everything to the right of the new expenses table through the old tables
+  const clearFrom = newTableWidth + 1;
+  const clearWidth = totalCols - newTableWidth;
+  if (clearWidth > 0) {
+    sheet.getRange(1, clearFrom, 15, clearWidth).clear();
+  }
+
+  // Restore borders on main summary table
+  sheet.getRange(2, 1, 14, newTableWidth).setBorder(true, true, true, true, true, true);
+
+  // Re-place profit table at its new correct column (based on new CATEGORIES.length)
+  if (hasProfitTable) {
+    const year = sheet.getName();
+    addProfitTableToSheet(sheet, year);
+
+    // Restore the saved Square + Other values (addProfitTableToSheet writes 0s)
+    const newProfitStartCol = CATEGORIES.length + 4; // same formula as addProfitTableToSheet
+    for (let i = 0; i < MONTHS.length; i++) {
+      const row = 3 + i;
+      sheet.getRange(row, newProfitStartCol + 1).setValue(savedProfitData[i][0]).setNumberFormat('$#,##0.00');
+      sheet.getRange(row, newProfitStartCol + 2).setValue(savedProfitData[i][1]).setNumberFormat('$#,##0.00');
+    }
+
+    // Re-place net results table if it existed
+    if (oldNetStartCol !== -1) {
+      addNetResultsTableToSheet(sheet, year);
+    }
+  }
+
+  // Refresh the category dropdown in the manual entries log
+  refreshManualLogValidation(sheet);
+
+  ui.alert('Done', `Categories regenerated.\n\nKept: ${surviving.join(', ') || 'none'}\nAdded: ${added.join(', ') || 'none'}\nRemoved: ${dropped.join(', ') || 'none'}`, ui.ButtonSet.OK);
+}
+
+/**
+ * Migration: adds the manual entries log to an existing year sheet that was
+ * created before this feature was added. Safe to run on any year sheet.
+ */
+function addManualEntriesLogToSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getActiveSheet();
+  const ui = SpreadsheetApp.getUi();
+
+  if (!/^\d{4}$/.test(sheet.getName())) {
+    ui.alert('Wrong Sheet', 'Navigate to a year sheet (e.g. "2026") first.', ui.ButtonSet.OK);
+    return;
+  }
+
+  // Check if manual log already exists by scanning the title row
+  const titleRow = findTransactionLogStartRow(sheet) - 2;
+  const lastCol = Math.max(sheet.getLastColumn(), MANUAL_LOG_START_COL);
+  const titleRowValues = sheet.getRange(titleRow, 1, 1, lastCol).getValues()[0];
+  const alreadyExists = titleRowValues.some(v => v && v.toString().startsWith('MANUAL ENTRIES'));
+  if (alreadyExists) {
+    ui.alert('Already Exists', 'This sheet already has a manual entries log.', ui.ButtonSet.OK);
+    return;
+  }
+
+  createManualEntriesLog(sheet, sheet.getName());
+  ui.alert('Done', 'Manual entries log added to the right of the transaction log.', ui.ButtonSet.OK);
+}
+
+/**
  * INITIALIZATION - Run this once to set up the spreadsheet
  * This creates the current year sheet with proper structure
  */
@@ -644,183 +1375,82 @@ function initializeCurrentYear() {
 function populateTestData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const year = new Date().getFullYear();
-  
+
   // Make sure the sheet exists
   let sheet = ss.getSheetByName(year.toString());
   if (!sheet) {
     sheet = createYearSheet(ss, year);
     Logger.log('Created sheet for ' + year);
   }
-  
-  // Define test data for each category with realistic vendors and amounts
-  const testData = [
-    // January
-    { date: `${year}-01-05`, category: 'Products/Ingredients', amount: 234.50, user: 'Levi', vendor: 'Restaurant Depot' },
-    { date: `${year}-01-08`, category: 'Gas', amount: 52.30, user: 'Taylor', vendor: 'Shell Station' },
-    { date: `${year}-01-12`, category: 'Products/Ingredients', amount: 189.75, user: 'Katie', vendor: 'Sysco' },
-    { date: `${year}-01-15`, category: 'Rent', amount: 2500.00, user: 'Levi', vendor: 'Property Management' },
-    { date: `${year}-01-20`, category: 'Misc', amount: 45.60, user: 'Jeff', vendor: 'Office Supplies' },
-    { date: `${year}-01-25`, category: 'Products/Ingredients', amount: 312.20, user: 'Levi', vendor: 'US Foods' },
-    
-    // February
-    { date: `${year}-02-03`, category: 'Products/Ingredients', amount: 276.80, user: 'Taylor', vendor: 'Restaurant Depot' },
-    { date: `${year}-02-07`, category: 'Gas', amount: 48.90, user: 'Katie', vendor: 'Chevron' },
-    { date: `${year}-02-10`, category: 'Asset Repair/Maintenance', amount: 450.00, user: 'Levi', vendor: 'HVAC Repair Co' },
-    { date: `${year}-02-14`, category: 'Products/Ingredients', amount: 198.45, user: 'Jeff', vendor: 'Sysco' },
-    { date: `${year}-02-15`, category: 'Rent', amount: 2500.00, user: 'Levi', vendor: 'Property Management' },
-    { date: `${year}-02-22`, category: 'Employees', amount: 1200.00, user: 'Levi', vendor: 'Payroll - Week 8' },
-    { date: `${year}-02-28`, category: 'Products/Ingredients', amount: 223.15, user: 'Taylor', vendor: 'US Foods' },
-    
-    // March
-    { date: `${year}-03-05`, category: 'Products/Ingredients', amount: 289.60, user: 'Levi', vendor: 'Restaurant Depot' },
-    { date: `${year}-03-08`, category: 'Gas', amount: 55.20, user: 'Taylor', vendor: 'Shell Station' },
-    { date: `${year}-03-12`, category: 'Contracts', amount: 350.00, user: 'Levi', vendor: 'Cleaning Service' },
-    { date: `${year}-03-15`, category: 'Rent', amount: 2500.00, user: 'Levi', vendor: 'Property Management' },
-    { date: `${year}-03-18`, category: 'Products/Ingredients', amount: 267.90, user: 'Katie', vendor: 'Sysco' },
-    { date: `${year}-03-22`, category: 'Employees', amount: 1350.00, user: 'Levi', vendor: 'Payroll - Week 12' },
-    { date: `${year}-03-28`, category: 'Misc', amount: 89.50, user: 'Jeff', vendor: 'Promotional Items' },
-    
-    // April
-    { date: `${year}-04-02`, category: 'Products/Ingredients', amount: 301.25, user: 'Taylor', vendor: 'US Foods' },
-    { date: `${year}-04-06`, category: 'Gas', amount: 61.40, user: 'Katie', vendor: 'BP Station' },
-    { date: `${year}-04-10`, category: 'Products/Ingredients', amount: 245.80, user: 'Levi', vendor: 'Restaurant Depot' },
-    { date: `${year}-04-15`, category: 'Rent', amount: 2500.00, user: 'Levi', vendor: 'Property Management' },
-    { date: `${year}-04-18`, category: 'Asset Repair/Maintenance', amount: 275.00, user: 'Jeff', vendor: 'Plumbing Repair' },
-    { date: `${year}-04-22`, category: 'Employees', amount: 1400.00, user: 'Levi', vendor: 'Payroll - Week 16' },
-    { date: `${year}-04-28`, category: 'Products/Ingredients', amount: 198.70, user: 'Taylor', vendor: 'Sysco' },
-    
-    // May
-    { date: `${year}-05-05`, category: 'Products/Ingredients', amount: 312.40, user: 'Levi', vendor: 'Restaurant Depot' },
-    { date: `${year}-05-08`, category: 'Gas', amount: 58.75, user: 'Taylor', vendor: 'Shell Station' },
-    { date: `${year}-05-12`, category: 'Products/Ingredients', amount: 287.20, user: 'Katie', vendor: 'US Foods' },
-    { date: `${year}-05-15`, category: 'Rent', amount: 2500.00, user: 'Levi', vendor: 'Property Management' },
-    { date: `${year}-05-20`, category: 'Contracts', amount: 350.00, user: 'Levi', vendor: 'Cleaning Service' },
-    { date: `${year}-05-25`, category: 'Employees', amount: 1500.00, user: 'Levi', vendor: 'Payroll - Week 21' },
-    { date: `${year}-05-30`, category: 'Misc', amount: 125.80, user: 'Jeff', vendor: 'Equipment' },
-    
-    // June
-    { date: `${year}-06-03`, category: 'Products/Ingredients', amount: 298.90, user: 'Taylor', vendor: 'Sysco' },
-    { date: `${year}-06-07`, category: 'Gas', amount: 64.30, user: 'Katie', vendor: 'Chevron' },
-    { date: `${year}-06-10`, category: 'Products/Ingredients', amount: 321.50, user: 'Levi', vendor: 'Restaurant Depot' },
-    { date: `${year}-06-15`, category: 'Rent', amount: 2500.00, user: 'Levi', vendor: 'Property Management' },
-    { date: `${year}-06-18`, category: 'Asset Repair/Maintenance', amount: 680.00, user: 'Levi', vendor: 'Equipment Repair' },
-    { date: `${year}-06-22`, category: 'Employees', amount: 1450.00, user: 'Levi', vendor: 'Payroll - Week 25' },
-    { date: `${year}-06-28`, category: 'Products/Ingredients', amount: 256.40, user: 'Taylor', vendor: 'US Foods' },
-    
-    // July
-    { date: `${year}-07-03`, category: 'Products/Ingredients', amount: 334.80, user: 'Levi', vendor: 'Restaurant Depot' },
-    { date: `${year}-07-08`, category: 'Gas', amount: 71.20, user: 'Taylor', vendor: 'Shell Station' },
-    { date: `${year}-07-12`, category: 'Products/Ingredients', amount: 289.60, user: 'Katie', vendor: 'Sysco' },
-    { date: `${year}-07-15`, category: 'Rent', amount: 2500.00, user: 'Levi', vendor: 'Property Management' },
-    { date: `${year}-07-20`, category: 'Contracts', amount: 350.00, user: 'Levi', vendor: 'Cleaning Service' },
-    { date: `${year}-07-22`, category: 'Employees', amount: 1600.00, user: 'Levi', vendor: 'Payroll - Week 29' },
-    { date: `${year}-07-28`, category: 'Misc', amount: 95.30, user: 'Jeff', vendor: 'Marketing Materials' },
-    
-    // August
-    { date: `${year}-08-02`, category: 'Products/Ingredients', amount: 312.70, user: 'Taylor', vendor: 'US Foods' },
-    { date: `${year}-08-06`, category: 'Gas', amount: 68.90, user: 'Katie', vendor: 'BP Station' },
-    { date: `${year}-08-10`, category: 'Products/Ingredients', amount: 298.40, user: 'Levi', vendor: 'Restaurant Depot' },
-    { date: `${year}-08-15`, category: 'Rent', amount: 2500.00, user: 'Levi', vendor: 'Property Management' },
-    { date: `${year}-08-18`, category: 'Asset Repair/Maintenance', amount: 325.00, user: 'Jeff', vendor: 'Electrical Repair' },
-    { date: `${year}-08-22`, category: 'Employees', amount: 1550.00, user: 'Levi', vendor: 'Payroll - Week 34' },
-    { date: `${year}-08-28`, category: 'Products/Ingredients', amount: 276.80, user: 'Taylor', vendor: 'Sysco' },
-    
-    // September
-    { date: `${year}-09-05`, category: 'Products/Ingredients', amount: 305.20, user: 'Levi', vendor: 'Restaurant Depot' },
-    { date: `${year}-09-08`, category: 'Gas', amount: 59.40, user: 'Taylor', vendor: 'Shell Station' },
-    { date: `${year}-09-12`, category: 'Products/Ingredients', amount: 289.90, user: 'Katie', vendor: 'US Foods' },
-    { date: `${year}-09-15`, category: 'Rent', amount: 2500.00, user: 'Levi', vendor: 'Property Management' },
-    { date: `${year}-09-20`, category: 'Contracts', amount: 350.00, user: 'Levi', vendor: 'Cleaning Service' },
-    { date: `${year}-09-25`, category: 'Employees', amount: 1500.00, user: 'Levi', vendor: 'Payroll - Week 39' },
-    { date: `${year}-09-30`, category: 'Misc', amount: 112.50, user: 'Jeff', vendor: 'Supplies' },
-    
-    // October (partial - current month)
-    { date: `${year}-10-02`, category: 'Products/Ingredients', amount: 287.30, user: 'Taylor', vendor: 'Sysco' },
-    { date: `${year}-10-05`, category: 'Gas', amount: 62.80, user: 'Katie', vendor: 'Chevron' },
-    { date: `${year}-10-08`, category: 'Products/Ingredients', amount: 298.60, user: 'Levi', vendor: 'Restaurant Depot' },
+
+  // Derive users from API_KEY_USERS in Config.js
+  const users = Object.values(API_KEY_USERS);
+
+  // Build test entries dynamically from the current CATEGORIES array.
+  // Spreads entries across all 12 months: every category gets at least one
+  // entry per month, cycling through users.
+  const testData = [];
+  const months = [
+    { num: '01', days: [3, 8, 15, 22, 28] },
+    { num: '02', days: [3, 8, 14, 20, 27] },
+    { num: '03', days: [2, 7, 12, 18, 25] },
+    { num: '04', days: [1, 6, 11, 17, 24] },
+    { num: '05', days: [2, 7, 13, 19, 27] },
+    { num: '06', days: [3, 8, 14, 20, 27] },
+    { num: '07', days: [1, 7, 12, 18, 25] },
+    { num: '08', days: [2, 8, 14, 20, 28] },
+    { num: '09', days: [3, 9, 15, 21, 28] },
+    { num: '10', days: [1, 6, 12, 18, 25] },
+    { num: '11', days: [2, 7, 13, 19, 26] },
+    { num: '12', days: [1, 6, 12, 18, 24] },
   ];
-  
+
+  // Simple deterministic amount generator — varies by category index and month
+  // so the summary table has visually distinct, non-uniform values.
+  function testAmount(catIndex, monthIndex, dayIndex) {
+    const base = 50 + (catIndex * 73 + monthIndex * 37 + dayIndex * 19) % 450;
+    return Math.round(base * 100) / 100;
+  }
+
+  let entryIndex = 0;
+  months.forEach((month, monthIndex) => {
+    CATEGORIES.forEach((category, catIndex) => {
+      // Use a subset of days so we don't flood the log — one entry per category per month
+      const day = month.days[catIndex % month.days.length];
+      const date = `${year}-${month.num}-${String(day).padStart(2, '0')}`;
+      const user = users[entryIndex % users.length];
+      const amount = testAmount(catIndex, monthIndex, catIndex);
+      testData.push({ date, category, amount, user });
+      entryIndex++;
+    });
+  });
+
   // Add all test receipts
   Logger.log('Adding test data...');
   let count = 0;
-  
+
   testData.forEach(receipt => {
     try {
-      // Create a fake drive link
-      const fakeLink = `https://drive.google.com/file/d/FAKE_${receipt.date}_${receipt.category}`;
-      
-      addReceipt(
-        receipt.date,
-        receipt.category,
-        receipt.amount,
-        [fakeLink],
-        receipt.user
-      );
+      const fakeLink = `https://drive.google.com/file/d/TEST_${receipt.date}_${receipt.category.replace(/\W+/g, '_')}`;
+      addReceipt(receipt.date, receipt.category, receipt.amount, [fakeLink], receipt.user);
       count++;
     } catch (error) {
-      Logger.log(`Error adding receipt: ${error.toString()}`);
+      Logger.log(`Error adding receipt for ${receipt.date} / ${receipt.category}: ${error.toString()}`);
     }
   });
-  
+
   Logger.log(`Successfully added ${count} test receipts`);
-  
+
   SpreadsheetApp.getUi().alert(
     'Test Data Added!',
-    `Successfully added ${count} test receipts across multiple months and categories.\n\n` +
-    'The sheet now shows:\n' +
-    '✓ Transaction log with varied entries\n' +
-    '✓ Multiple users (Levi, Taylor, Katie, Jeff)\n' +
-    '✓ All expense categories\n' +
-    '✓ Monthly summary totals\n\n' +
+    `Added ${count} test receipts across 12 months.\n\n` +
+    `Categories used: ${CATEGORIES.join(', ')}\n` +
+    `Users: ${users.join(', ')}\n\n` +
     'Check the transaction log and monthly summary table!',
     SpreadsheetApp.getUi().ButtonSet.OK
   );
 }
 
-/**
- * Test function - tests adding a receipt with drive link
- * Uses the full category name (still supported)
- */
-function testAddReceipt() {
-  const result = addReceipt(
-    '2025-10-08',
-    'Products/Ingredients', // Full category name still works
-    45.67,
-    ['https://drive.google.com/file/d/example'],
-    'Test User'
-  );
-  Logger.log(result);
-}
-
-/**
- * Test function - simulates a complete API call with single photo upload
- * Demonstrates using a category alias ("gas" instead of "Gas")
- */
-function testAddReceiptWithPhoto() {
-  // Create a simple test image (1x1 red pixel JPEG)
-  const testImageBase64 = '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/2wBDAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwA2Af/Z';
-  
-  try {
-    const fileLink = uploadPhotoToDrive(
-      testImageBase64,
-      '2025-10-08',
-      'Gas', // Category name for folder
-      'Test User'
-    );
-    Logger.log('Photo uploaded successfully to: ' + fileLink);
-    
-    const result = addReceipt(
-      '2025-10-08',
-      'Gas',
-      25.50,
-      [fileLink],
-      'Test User'
-    );
-    Logger.log(result);
-  } catch (error) {
-    Logger.log('Test failed: ' + error.toString());
-  }
-}
 
 /**
  * Test function - simulates a complete API call with multiple photo upload
@@ -831,17 +1461,18 @@ function testAddReceiptWithMultiplePhotos() {
   const testImageBase64 = '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/2wBDAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwA2Af/Z';
   
   try {
+    const testCategory = CATEGORIES[0];
     const fileLinks = uploadPhotosToDrive(
       [testImageBase64, testImageBase64, testImageBase64], // 3 photos
       '2025-10-08',
-      'Products/Ingredients',
+      testCategory,
       'Test User'
     );
     Logger.log('Photos uploaded successfully: ' + fileLinks.length + ' files');
-    
+
     const result = addReceipt(
       '2025-10-08',
-      'Products/Ingredients',
+      testCategory,
       125.75,
       fileLinks,
       'Test User'
@@ -858,22 +1489,14 @@ function testAddReceiptWithMultiplePhotos() {
  */
 function testCategoryAliases() {
   Logger.log('Testing category aliases...\n');
-  
-  const testCases = [
-    { input: 'products', expected: 'Products/Ingredients' },
-    { input: 'gas', expected: 'Gas' },
-    { input: 'fuel', expected: 'Gas' },
-    { input: 'repair', expected: 'Asset Repair/Maintenance' },
-    { input: 'supplies', expected: 'Operating Supplies' },
-    { input: 'misc', expected: 'Misc' },
-  ];
-  
-  testCases.forEach(test => {
-    const normalized = CATEGORY_ALIASES[test.input];
-    const status = normalized === test.expected ? '✓' : '✗';
-    Logger.log(`${status} "${test.input}" → "${normalized}" (expected: "${test.expected}")`);
+
+  // Derive test cases directly from CATEGORY_ALIASES so this stays in sync with Config.js
+  Object.entries(CATEGORY_ALIASES).forEach(([input, expected]) => {
+    const resolved = CATEGORY_ALIASES[input.toLowerCase()];
+    const status = resolved === expected ? '✓' : '✗';
+    Logger.log(`${status} "${input}" → "${resolved}" (expected: "${expected}")`);
   });
-  
+
   Logger.log('\nRun showValidCategories() to see all valid inputs.');
 }
 
@@ -925,96 +1548,6 @@ function testDynamicCategories() {
 }
 
 /**
- * Test function - tests automatic new year sheet creation
- * This simulates the first receipt entry of a new year
- */
-function testNewYearAutoCreation() {
-  try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const nextYear = new Date().getFullYear() + 1;
-    
-    // Check if sheet already exists
-    const existingSheet = ss.getSheetByName(nextYear.toString());
-    if (existingSheet) {
-      Logger.log(`⚠️  Sheet for ${nextYear} already exists. Skipping test.`);
-      Logger.log('Delete the sheet manually if you want to test auto-creation again.');
-      return;
-    }
-    
-    Logger.log(`Testing auto-creation of sheet for year ${nextYear}...`);
-    Logger.log('');
-    
-    // Try adding a receipt for next year (should auto-create the sheet)
-    Logger.log('Step 1: Calling addReceipt()...');
-    const result = addReceipt(
-      `${nextYear}-01-01`,
-      'Products/Ingredients',
-      100.00,
-      ['https://drive.google.com/file/d/test_new_year'],
-      'Test User'
-    );
-    
-    Logger.log('✓ addReceipt() completed: ' + result);
-    Logger.log('');
-    
-    // Verify the sheet was created
-    Logger.log('Step 2: Verifying sheet creation...');
-    const newSheet = ss.getSheetByName(nextYear.toString());
-    
-    if (newSheet) {
-      Logger.log(`✓ Sheet "${nextYear}" was automatically created`);
-      
-      // Check monthly summary
-      const summaryTitle = newSheet.getRange(1, 1).getValue();
-      Logger.log(`✓ Monthly summary table present: "${summaryTitle}"`);
-      
-      // Check transaction log
-      const transactionTitle = newSheet.getRange(17, 1).getValue();
-      Logger.log(`✓ Transaction log present: "${transactionTitle}"`);
-      
-      // Check if data was added correctly
-      const firstDataRow = newSheet.getRange(19, 1).getValue();
-      if (firstDataRow) {
-        Logger.log(`✓ Transaction data verified in row 19: ${firstDataRow}`);
-      } else {
-        Logger.log('⚠️  Transaction data not found in row 19');
-      }
-      
-      // Show summary totals
-      const januaryTotal = newSheet.getRange(3, 2).getValue();
-      Logger.log(`✓ January "Products/Ingredients" total: $${januaryTotal}`);
-      
-      Logger.log('');
-      Logger.log('======================');
-      Logger.log('✓ TEST PASSED!');
-      Logger.log('======================');
-      Logger.log(`Check the "${nextYear}" sheet in your spreadsheet.`);
-      
-    } else {
-      Logger.log('');
-      Logger.log('======================');
-      Logger.log('✗ TEST FAILED');
-      Logger.log('======================');
-      Logger.log('ERROR: Sheet was not created.');
-      Logger.log('');
-      Logger.log('Debugging info:');
-      Logger.log('- All sheet names in spreadsheet:');
-      ss.getSheets().forEach(sheet => {
-        Logger.log('  - ' + sheet.getName());
-      });
-    }
-    
-  } catch (error) {
-    Logger.log('');
-    Logger.log('======================');
-    Logger.log('✗ TEST FAILED WITH ERROR');
-    Logger.log('======================');
-    Logger.log('Error: ' + error.toString());
-    Logger.log('Stack trace: ' + error.stack);
-  }
-}
-
-/**
  * Get Receipts folder ID helper
  */
 function createReceiptsFolderAndGetId() {
@@ -1023,44 +1556,4 @@ function createReceiptsFolderAndGetId() {
   Logger.log('Folder ID: ' + folder.getId());
   Logger.log('Update RECEIPTS_FOLDER_ID in your script with this ID');
   return folder.getId();
-}
-
-/**
- * Helper function to display all valid category inputs
- */
-function showValidCategories() {
-  Logger.log('=== VALID CATEGORY INPUTS ===\n');
-  
-  // Group aliases by their target category
-  const grouped = {};
-  for (const [alias, category] of Object.entries(CATEGORY_ALIASES)) {
-    if (!grouped[category]) {
-      grouped[category] = [];
-    }
-    grouped[category].push(alias);
-  }
-  
-  // Build message for both Logger and UI
-  let message = 'VALID CATEGORY INPUTS\n\n';
-  
-  // Display organized by category
-  for (const category of CATEGORIES) {
-    Logger.log(`${category}:`);
-    message += `${category}:\n`;
-    
-    if (grouped[category]) {
-      const inputs = grouped[category].join(', ');
-      Logger.log(`  Accepted inputs: ${inputs}`);
-      message += `  ${inputs}\n`;
-    }
-    Logger.log('');
-    message += '\n';
-  }
-  
-  // Show in UI dialog
-  SpreadsheetApp.getUi().alert(
-    'Valid Category Inputs',
-    message,
-    SpreadsheetApp.getUi().ButtonSet.OK
-  );
 }
