@@ -626,10 +626,8 @@ function addProfitTable() {
  * Checks if a sheet already has a profit table
  */
 function sheetHasProfitTable(sheet) {
-  const expensesColumns = CATEGORIES.length + 2;
-  const profitStartColumn = expensesColumns + 1;
-  const cellValue = sheet.getRange(1, profitStartColumn).getValue();
-  return cellValue && cellValue.toString().includes('PROFIT');
+  const row1 = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  return row1.some(v => v && v.toString().includes('PROFIT'));
 }
 
 /**
@@ -637,7 +635,7 @@ function sheetHasProfitTable(sheet) {
  */
 function addProfitTableToSheet(sheet, year) {
   const expensesColumns = CATEGORIES.length + 2;
-  const profitStartColumn = expensesColumns + 2;
+  const profitStartColumn = expensesColumns + 3;
   const profitStartColLetter = String.fromCharCode(65 + profitStartColumn - 1);
   
   const startRow = 1;
@@ -772,11 +770,8 @@ function sheetHasExpensesTable(sheet) {
  * Checks if a sheet already has a net results table
  */
 function sheetHasNetResultsTable(sheet) {
-  const expensesColumns = CATEGORIES.length + 2;
-  const profitColumns = 4;
-  const netStartColumn = expensesColumns + 1 + profitColumns + 1;
-  const cellValue = sheet.getRange(1, netStartColumn).getValue();
-  return cellValue && cellValue.toString().includes('NET');
+  const row1 = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  return row1.some(v => v && v.toString().includes('NET'));
 }
 
 /**
@@ -785,7 +780,9 @@ function sheetHasNetResultsTable(sheet) {
 function addNetResultsTableToSheet(sheet, year) {
   const expensesColumns = CATEGORIES.length + 2;
   const profitColumns = 4;
-  const profitStartColumn = expensesColumns + 2;
+  // Find profit table by scanning row 1 rather than relying on a fixed offset
+  const row1 = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const profitStartColumn = row1.findIndex(v => v && v.toString().includes('PROFIT')) + 1;
   const netStartColumn = profitStartColumn + profitColumns + 1;
   
   const startRow = 1;
@@ -1270,7 +1267,7 @@ function regenerateSheetCategories() {
     addProfitTableToSheet(sheet, year);
 
     // Restore the saved Square + Other values (addProfitTableToSheet writes 0s)
-    const newProfitStartCol = CATEGORIES.length + 4; // same formula as addProfitTableToSheet
+    const newProfitStartCol = CATEGORIES.length + 5; // same formula as addProfitTableToSheet
     for (let i = 0; i < MONTHS.length; i++) {
       const row = 3 + i;
       sheet.getRange(row, newProfitStartCol + 1).setValue(savedProfitData[i][0]).setNumberFormat('$#,##0.00');

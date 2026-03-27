@@ -126,7 +126,7 @@ function appendLog(action, bills, totalChange, note, status) {
     note || '',
     status,
   ];
-  sheet.appendRow(row);
+  sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
 }
 
 // ---- Request Handlers --------------------------------------
@@ -141,7 +141,6 @@ function handleDelta(bills, note) {
     return errorResponse('No changes — all bill counts are 0');
   }
 
-  const sheet = getDrawerSheet();
   const drawer = readDrawer();
 
   // Validate — don't allow counts to go negative
@@ -156,20 +155,21 @@ function handleDelta(bills, note) {
     }
   }
 
-  // Apply deltas
+  // Compute new counts in memory
   let totalChange = 0;
   for (const [denomStr, delta] of Object.entries(bills)) {
     const denom = Number(denomStr);
     const d = drawer[denom];
-    const newCount = d.count + Number(delta);
-    sheet.getRange(d.row, 2).setValue(newCount);
-    d.count = newCount; // update local map for status check
+    d.count = d.count + Number(delta);
     totalChange += Number(delta) * denom;
   }
 
   const { status, warnings } = evaluateStatus(drawer);
   const drawerTotal = totalValue(drawer);
 
+  // Write all changes — drawer batch first, then log
+  const countColumn = DENOMINATIONS.map(d => [drawer[d] ? drawer[d].count : 0]);
+  getDrawerSheet().getRange(2, 2, DENOMINATIONS.length, 1).setValues(countColumn);
   appendLog('delta', bills, totalChange, note, status);
 
   return buildResponse(status, drawer, drawerTotal, warnings, totalChange);
@@ -179,7 +179,6 @@ function handleDelta(bills, note) {
  * Handles absolute set: replaces bill counts entirely.
  */
 function handleSet(bills, note) {
-  const sheet = getDrawerSheet();
   const drawer = readDrawer();
 
   for (const [denomStr] of Object.entries(bills)) {
@@ -188,6 +187,7 @@ function handleSet(bills, note) {
     }
   }
 
+  // Compute new counts in memory
   let totalChange = 0;
   for (const [denomStr, newCount] of Object.entries(bills)) {
     const denom = Number(denomStr);
@@ -195,15 +195,16 @@ function handleSet(bills, note) {
     if (Number(newCount) < 0) {
       return errorResponse(`Count cannot be negative for $${denom}`);
     }
-    const delta = Number(newCount) - d.count;
-    sheet.getRange(d.row, 2).setValue(Number(newCount));
-    totalChange += delta * denom;
+    totalChange += (Number(newCount) - d.count) * denom;
     d.count = Number(newCount);
   }
 
   const { status, warnings } = evaluateStatus(drawer);
   const drawerTotal = totalValue(drawer);
 
+  // Write all changes — drawer batch first, then log
+  const countColumn = DENOMINATIONS.map(d => [drawer[d] ? drawer[d].count : 0]);
+  getDrawerSheet().getRange(2, 2, DENOMINATIONS.length, 1).setValues(countColumn);
   appendLog('set', bills, totalChange, note, status);
 
   return buildResponse(status, drawer, drawerTotal, warnings, totalChange);
@@ -282,6 +283,13 @@ function doGet(e) {
  * }
  */
 function doPost(e) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (lockErr) {
+    return errorResponse('Server busy, please retry in a moment.');
+  }
+
   try {
     const body = JSON.parse(e.postData.contents);
     // SECURITY CHECK: Verify API key (expects {"apiKey": "..."} in JSON body)
@@ -317,6 +325,8 @@ function doPost(e) {
 
   } catch (err) {
     return errorResponse(`Failed to parse request: ${err.message}`);
+  } finally {
+    lock.releaseLock();
   }
 }
 
